@@ -1,4 +1,5 @@
 # AI4ALL-Group-3D   
 6/9 - Uploaded original datasets, did some simlpe data analysis    
 6/11 - Concactenated datasets    
-6/13 - Finished Data preprocessing, applied basic feature engineering and model trials
+6/13 - Finished Data preprocessing, applied basic feature engineering and model trials   
+7/8 - Finished setting up a reproducible baseline feature engineering model (used for comparison)
