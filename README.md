@@ -1,4 +1,4 @@
-# AI4ALL-Group-3D — Reading-Difficulty Grading
+# LLM Text Readability Grading
 
 Predict how hard a text is to read, in a way that **generalizes beyond the corpus
 it was trained on**. Built on the CLEAR corpus (CommonLit Readability Prize),
