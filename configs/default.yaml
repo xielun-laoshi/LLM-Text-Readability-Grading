@@ -9,7 +9,7 @@ paths:
   runs: runs
 
 data:
-  corpora: [clear]
+  corpora: [clear, onestop]
   unified_table: artifacts/corpus.csv
   min_tokens: 3
   max_tokens: 600
