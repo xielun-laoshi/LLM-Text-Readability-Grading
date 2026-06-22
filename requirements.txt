@@ -1,6 +1,17 @@
-pandas
-numpy
-matplotlib
-seaborn
-torch
-transformers
+# Core — Phases 0-2 (data + schema) and Phase 7 (evaluation harness).
+# Pinned to versions verified in this environment (Python 3.11).
+numpy==1.26.4
+pandas==2.2.2
+scipy==1.14.0
+scikit-learn==1.5.1
+PyYAML==6.0.2
+
+# Modeling — Phases 4-6. Uncomment to install (heavy). On a GPU box, install the
+# matching CUDA torch wheel instead of the default CPU build.
+# torch==2.7.1
+# transformers==4.54.1
+# peft>=0.11
+# datasets>=2.19
+
+# Optional — parquet I/O for the unified schema table (else CSV is used).
+# pyarrow>=15

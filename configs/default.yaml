@@ -1,0 +1,59 @@
+# Default experiment config. Every knob is a value, not a code edit, so the
+# Phase-8 ablation matrix is just a set of overrides:
+#   python scripts/train.py model.use_pairwise_head=false
+experiment: default
+
+paths:
+  raw: data            # raw downloads only
+  artifacts: artifacts # derived tables / predictions / embeddings
+  runs: runs
+
+data:
+  corpora: [clear]
+  unified_table: artifacts/corpus.csv
+  min_tokens: 3
+  max_tokens: 600
+
+splits:
+  holdout_corpora: []      # e.g. [onestop] -> cross-corpus gold test
+  holdout_formats: []      # e.g. [poetry]  -> cross-format gold test
+  group_by: corpus
+  n_folds: 5
+  val_fraction: 0.1
+  seed: 42
+
+model:
+  backbone: microsoft/deberta-v3-base
+  max_length: 512
+  dropout: 0.1
+  use_pairwise_head: true
+  use_source_offset: true
+  peft: false
+
+train:
+  stage: finetune          # pretrain (on pseudo-labels) | finetune (on gold)
+  epochs: 3
+  batch_size: 16
+  lr: 2.0e-5
+  weight_decay: 0.01
+  pointwise_weight: 1.0
+  pairwise_weight: 1.0
+  confidence_weighting: true
+  seed: 42
+
+eval:
+  # Reference bracket is read straight off the raw CLEAR corpus, so these are
+  # CLEAR's own column names.
+  target_col: "BT Easiness"
+  se_col: "BT s.e."
+  formula_cols:
+    - Flesch-Reading-Ease
+    - Flesch-Kincaid-Grade-Level
+    - New Dale-Chall Readability Formula
+    - CAREC
+  solution_cols:
+    - firstPlace_pred
+    - secondPlace_pred
+    - thirdPlace_pred
+  n_bootstrap: 1000
+  seed: 42
