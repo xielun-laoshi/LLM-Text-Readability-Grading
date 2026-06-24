@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 
 from readability.schema import CANONICAL_COLUMNS, Record, records_to_frame, validate
-from readability.data import percentile_within_corpus, POLARITY
+from readability.data import percentile_within_corpus, POLARITY, derive_group_id, cv_folds
 from readability.evaluation import spearman, pairwise_accuracy, rmse, mean_predictor_rmse
 
 
@@ -53,3 +53,26 @@ def test_metrics_basic():
 def test_mean_predictor_rmse_equals_std():
     y = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
     assert abs(mean_predictor_rmse(y) - y.std(ddof=0)) < 1e-9
+
+
+def test_derive_group_id_collapses_onestop_levels():
+    df = pd.DataFrame({"id": ["onestop:Amazon:ele:0", "onestop:Amazon:adv:1", "clear:42"]})
+    g = derive_group_id(df).tolist()
+    # all reading-levels / chunks of one article share a group; flat ids stand alone
+    assert g[0] == g[1] == "onestop:Amazon"
+    assert g[2] == "clear:42"
+
+
+def test_cv_folds_never_leak_a_group():
+    # 10 articles x 3 reading-levels = 30 rows, 10 groups, 5 folds.
+    rows = [{"id": f"onestop:art{a}:{lvl}:0", "split": "train"}
+            for a in range(10) for lvl in ("ele", "int", "adv")]
+    df = pd.DataFrame(rows)
+    validated = []
+    for tr, va in cv_folds(df, group_by="auto", n_folds=5):
+        gtr = set(derive_group_id(df.loc[tr]))
+        gva = set(derive_group_id(df.loc[va]))
+        assert gtr.isdisjoint(gva)                       # no article on both sides
+        validated.append(gva)
+    # every article is validated exactly once across the folds
+    assert set().union(*validated) == {f"onestop:art{a}" for a in range(10)}

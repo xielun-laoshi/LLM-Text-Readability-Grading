@@ -257,12 +257,51 @@ def assign_splits(df: pd.DataFrame, *, holdout_corpora: list[str] | None = None,
     return out
 
 
-def group_kfold_indices(df: pd.DataFrame, *, group_col: str = "corpus",
-                        n_folds: int = 5):
-    """Folds that never split a group across folds (no cross-source leakage)."""
+def derive_group_id(df: pd.DataFrame) -> pd.Series:
+    """Leakage-safe grouping key derived from the row id.
+
+    Keeps every chunk AND every reading-level of one source article together so a
+    near-duplicate can't straddle the train/val boundary. ids are structured as
+    ``corpus:article:level:chunk`` (OneStopEnglish, 4 parts) or ``corpus:n``
+    (CLEAR, 2 parts); we collapse the former to ``corpus:article`` and leave flat
+    ids as their own group.
+    """
+    def base(rid: str) -> str:
+        parts = str(rid).split(":")
+        return ":".join(parts[:2]) if len(parts) >= 4 else str(rid)
+    return df["id"].map(base)
+
+
+def cv_folds(df: pd.DataFrame, *, group_by: str = "auto", n_folds: int = 5,
+             pool_splits: tuple[str, ...] = ("train", "val")):
+    """Yield leakage-safe (train_idx, val_idx) cross-validation folds.
+
+    ``group_by``:
+      "auto"   -> group by source article/passage (derive_group_id). The always-on
+                  integrity fix: OneStopEnglish's three reading-levels and every
+                  windowed chunk of one article stay inside a single fold.
+      "corpus" -> hold out an entire corpus per fold (cross-corpus transfer CV;
+                  needs >= n_folds corpora in the pool).
+      <column> -> group by that schema column.
+
+    Operates on the {train, val} pool only -- the gold ood_* holdout is never part
+    of CV. Raises if there are fewer groups than folds (the split would be invalid).
+    """
     from sklearn.model_selection import GroupKFold
 
-    pool = df[df["split"].isin({"train", "val"})]
+    pool = df[df["split"].isin(set(pool_splits))]
+    if group_by == "auto":
+        groups = derive_group_id(pool).to_numpy()
+    elif group_by in pool.columns:
+        groups = pool[group_by].astype(str).to_numpy()
+    else:
+        raise ValueError(f"group_by must be 'auto', 'corpus', or a column name; got '{group_by}'")
+
+    n_groups = len(set(groups))
+    if n_groups < n_folds:
+        raise ValueError(
+            f"only {n_groups} group(s) for group_by='{group_by}' but n_folds={n_folds}; "
+            f"use fewer folds, a finer group_by, or leave-one-group-out.")
     gkf = GroupKFold(n_splits=n_folds)
-    for tr, va in gkf.split(np.zeros(len(pool)), groups=pool[group_col].to_numpy()):
+    for tr, va in gkf.split(np.zeros(len(pool)), groups=groups):
         yield pool.index[tr].to_numpy(), pool.index[va].to_numpy()
