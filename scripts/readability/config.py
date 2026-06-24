@@ -86,6 +86,32 @@ class EvalConfig:
 
 
 @dataclass
+class ExternalConfig:
+    sources: list[str] = field(default_factory=lambda: ["wiki_simple", "wiki_en", "gutenberg"])
+    per_source_docs: int = 5000        # streamed per source (bounded; raise on the H100)
+    n_total: int = 200_000             # diverse-selected pool size
+    n_bins: int = 10
+    pool_table: str = "artifacts/external_pool.csv"
+
+
+@dataclass
+class TeacherConfig:
+    backbone: str = "microsoft/deberta-v3-base"
+    n_teachers: int = 3                # ensemble for disagreement filtering
+    target_col: str = "native_label"   # teacher predicts CLEAR BT (SE-filter in BT units)
+    dir: str = "models/teachers"
+
+
+@dataclass
+class PseudoLabelConfig:
+    k_se: float = 1.0                  # keep |pred - neighbour| <= k_se * neighbour s.e.
+    max_std: float | None = None       # disagreement gate (None -> median split)
+    embed_backbone: str = "sentence-transformers/all-MiniLM-L6-v2"
+    out_table: str = "artifacts/pseudo_labeled.csv"
+    train_pool_table: str = "artifacts/train_pool.csv"  # gold + pseudo, ready for the student
+
+
+@dataclass
 class Config:
     experiment: str = "default"
     paths: PathsConfig = field(default_factory=PathsConfig)
@@ -94,6 +120,9 @@ class Config:
     model: ModelConfig = field(default_factory=ModelConfig)
     train: TrainConfig = field(default_factory=TrainConfig)
     eval: EvalConfig = field(default_factory=EvalConfig)
+    external: ExternalConfig = field(default_factory=ExternalConfig)
+    teacher: TeacherConfig = field(default_factory=TeacherConfig)
+    pseudo: PseudoLabelConfig = field(default_factory=PseudoLabelConfig)
 
 
 def _from_dict(cls: type, data: dict[str, Any]) -> Any:

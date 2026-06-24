@@ -28,11 +28,17 @@ def main(argv: list[str] | None = None) -> int:
     run.log_params(cfg)
     log.info("run dir: %s", run.dir)
 
+    from pathlib import Path
+
     from readability.training import Trainer  # lazy import (pulls torch)
 
-    df = read_table(cfg.data.unified_table)
-    trainer = Trainer(cfg)
-    trainer.fit(df[df["split"] == "train"], df[df["split"] == "val"])
+    # prefer the pseudo-augmented pool (gold + pseudo) if Phase 4 produced it
+    table = cfg.pseudo.train_pool_table if Path(cfg.pseudo.train_pool_table).exists() \
+        else cfg.data.unified_table
+    df = read_table(table)
+    log.info("student training table: %s (%d rows)", table, len(df))
+    trainer = Trainer(cfg)  # target defaults to harmonized_difficulty
+    trainer.fit(df[df["split"] == "train"], df[df["split"] == "val"], run=run)
     return 0
 
 

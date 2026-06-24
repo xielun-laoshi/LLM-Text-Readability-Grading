@@ -41,6 +41,26 @@ train:
   confidence_weighting: true
   seed: 42
 
+external:                    # Phase 4: diverse unlabeled pool
+  sources: [wiki_simple, wiki_en, gutenberg]
+  per_source_docs: 5000      # streamed per source (bounded); raise freely on the H100
+  n_total: 200000            # diverse-selected pool size
+  n_bins: 10
+  pool_table: artifacts/external_pool.csv
+
+teacher:                     # Phase 4: teacher ensemble (predicts CLEAR BT)
+  backbone: microsoft/deberta-v3-base
+  n_teachers: 3
+  target_col: native_label
+  dir: models/teachers
+
+pseudo:                      # Phase 4: pseudo-label filtering + merge
+  k_se: 1.0                  # keep |pred - neighbour| <= k_se * neighbour s.e.
+  max_std: null              # disagreement gate (null -> median split)
+  embed_backbone: sentence-transformers/all-MiniLM-L6-v2
+  out_table: artifacts/pseudo_labeled.csv
+  train_pool_table: artifacts/train_pool.csv
+
 eval:
   # Reference bracket is read straight off the raw CLEAR corpus, so these are
   # CLEAR's own column names.

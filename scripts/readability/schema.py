@@ -88,7 +88,7 @@ def coerce(df: pd.DataFrame) -> pd.DataFrame:
     for c in ("native_label", "harmonized_difficulty", "mapping_confidence", "std_error"):
         out[c] = pd.to_numeric(out[c], errors="coerce")
     out["length_tokens"] = pd.to_numeric(out["length_tokens"], errors="coerce").astype("Int64")
-    out["is_pseudo"] = out["is_pseudo"].fillna(False).astype(bool)
+    out["is_pseudo"] = out["is_pseudo"].fillna(False).infer_objects(copy=False).astype(bool)
     return out.reindex(columns=CANONICAL_COLUMNS)
 
 
