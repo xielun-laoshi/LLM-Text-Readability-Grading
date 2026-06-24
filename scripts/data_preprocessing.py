@@ -20,6 +20,7 @@ from __future__ import annotations
 import argparse
 import sys
 import urllib.request
+import zipfile
 from pathlib import Path
 
 import pandas as pd
@@ -27,37 +28,59 @@ import pandas as pd
 # scripts/ is on sys.path[0] when this file is run directly, so `readability`
 # (the support lib at scripts/readability/) imports without any install step.
 from readability.config import load_config
-from readability.data import assign_splits, harmonize, load_corpus
+from readability.data import assign_splits, filter_corpus, harmonize, load_corpus
 from readability.schema import CANONICAL_COLUMNS, coerce, validate, write_table
 from readability.utils import artifacts_dir, data_dir, get_logger, seed_everything
 
 log = get_logger("preprocess")
 
-# Public, free raw sources. None => manual/licensed (documented, not auto-fetched).
+# Public, free raw sources. Each entry: {"url": <url or None>, "file"|"dir":
+# <local target under data/>, "archive": "zip" (optional)}.  url=None => a
+# manual/licensed source (documented, not auto-fetched).
 RAW_SOURCES = {
-    "clear": "https://raw.githubusercontent.com/scrosseye/CLEAR-Corpus/main/CLEAR_corpus_final.csv",
-    "onestop": None,        # github.com/nishkalavallabhi/OneStopEnglishCorpus
-    "newsela": None,        # newsela.com/data (free for research, on request)
-    "weebit": None,         # request from authors
-    "gutenberg_poetry": None,  # Project Gutenberg public domain
+    "clear": {"url": "https://raw.githubusercontent.com/scrosseye/CLEAR-Corpus/main/CLEAR_corpus_final.csv",
+              "file": "CLEAR.csv"},
+    "onestop": {"url": "https://github.com/nishkalavallabhi/OneStopEnglishCorpus/archive/refs/heads/master.zip",
+                "dir": "onestop", "archive": "zip"},
+    "newsela": {"url": None, "dir": "newsela"},      # newsela.com/data (free, on request)
+    "weebit": {"url": None, "dir": "weebit"},        # request from authors
+    "gutenberg_poetry": {"url": None, "dir": "gutenberg_poetry"},  # Project Gutenberg
 }
 
 
+def local_raw_path(corpus: str) -> Path:
+    """Where this corpus's raw data lives under data/ (a file or a directory)."""
+    spec = RAW_SOURCES[corpus]
+    return data_dir() / (spec["file"] if "file" in spec else spec["dir"])
+
+
 def ensure_raw(corpus: str, force: bool) -> Path:
-    """Make sure data/<CORPUS>.csv exists; download it if public and missing."""
-    dest = data_dir() / ("CLEAR.csv" if corpus == "clear" else f"{corpus}.csv")
-    if dest.exists() and not force:
+    """Make sure the raw data is present under data/, downloading if public+missing.
+    Returns a file path (single-file corpora) or a directory (archive corpora)."""
+    spec = RAW_SOURCES.get(corpus)
+    if spec is None:
+        raise SystemExit(f"[{corpus}] unknown corpus (no source configured).")
+    dest = local_raw_path(corpus)
+    present = dest.exists() and (any(dest.iterdir()) if dest.is_dir() else True)
+    if present and not force:
         log.info("[%s] using existing %s", corpus, dest)
         return dest
-    url = RAW_SOURCES.get(corpus)
-    if url is None:
+    if spec.get("url") is None:
         raise SystemExit(
             f"[{corpus}] no public download configured -- fetch it manually into "
-            f"{dest} (see RAW_SOURCES notes), then re-run."
-        )
-    dest.parent.mkdir(parents=True, exist_ok=True)
+            f"{dest} (see RAW_SOURCES notes), then re-run with --skip-download.")
+    data_dir().mkdir(parents=True, exist_ok=True)
+    if spec.get("archive") == "zip":
+        zip_path = data_dir() / f"{corpus}.zip"
+        log.info("[%s] downloading archive -> %s", corpus, zip_path)
+        urllib.request.urlretrieve(spec["url"], zip_path)
+        log.info("[%s] extracting -> %s", corpus, dest)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(dest)
+        zip_path.unlink(missing_ok=True)
+        return dest
     log.info("[%s] downloading -> %s", corpus, dest)
-    urllib.request.urlretrieve(url, dest)
+    urllib.request.urlretrieve(spec["url"], dest)
     log.info("[%s] downloaded %d bytes", corpus, dest.stat().st_size)
     return dest
 
@@ -85,10 +108,12 @@ def main(argv: list[str] | None = None) -> int:
     # 1. download + 2. load into the unified schema
     frames = []
     for name in corpora:
-        raw = (data_dir() / ("CLEAR.csv" if name == "clear" else f"{name}.csv")) if args.skip_download \
-            else ensure_raw(name, args.force_download)
+        raw = local_raw_path(name) if args.skip_download else ensure_raw(name, args.force_download)
         frames.append(load_corpus(name, raw))
     df = coerce(pd.concat(frames, ignore_index=True))
+
+    # 2b. QC filters: empties, length band, language, exact-dedup within corpus
+    df = filter_corpus(df, min_tokens=cfg.data.min_tokens, max_tokens=cfg.data.max_tokens)
 
     # 3. harmonize onto the open [0, 1] axis
     df = harmonize(df, method=args.harmonize_method)

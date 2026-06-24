@@ -1,4 +1,4 @@
-# Core — Phases 0-2 (data + schema) and Phase 7 (evaluation harness).
+# Core — data preprocessing (Phases 1-2) + evaluation harness (Phase 7).
 # Pinned to versions verified in this environment (Python 3.11).
 numpy==1.26.4
 pandas==2.2.2
@@ -6,12 +6,16 @@ scipy==1.14.0
 scikit-learn==1.5.1
 PyYAML==6.0.2
 
-# Modeling — Phases 4-6. Uncomment to install (heavy). On a GPU box, install the
-# matching CUDA torch wheel instead of the default CPU build.
-# torch==2.7.1
-# transformers==4.54.1
-# peft>=0.11
-# datasets>=2.19
+# Modeling — Phases 4-6 (teacher, pseudo-labeling, student).
+# torch is installed SEPARATELY with a CUDA build to use the GPU, e.g.:
+#   pip uninstall -y torch
+#   pip install torch --index-url https://download.pytorch.org/whl/cu126
+# (pick the CUDA tag <= what `nvidia-smi` reports; see pytorch.org/get-started)
+transformers>=4.40
+sentencepiece>=0.1.99 # DeBERTa-v3 tokenizer
+datasets>=2.19        # streaming fetch of the external pool (build_external_pool.py)
+peft>=0.11            # optional LoRA (model.peft=true)
+accelerate>=0.30      # mixed-precision / device placement helpers
 
-# Optional — parquet I/O for the unified schema table (else CSV is used).
+# Optional — parquet I/O for large unified tables (else CSV is used).
 # pyarrow>=15

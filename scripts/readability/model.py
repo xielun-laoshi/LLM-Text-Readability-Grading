@@ -1,71 +1,95 @@
-"""Model core (framework Phase 5). Pure Python on torch/transformers, imported
-lazily so the data/eval path runs without the heavy stack installed.
+"""Model core (Phase 5): encoder backbone + regression head, with two upgrades
+over the winner's single-task regressor:
 
-This is the part of the pipeline not built out yet -- the interfaces are fixed so
-the trainer and eval harness can be written against them; bodies are TODO stubs.
+  1. a per-source offset (label-aware / mixed-effects) so the model conditions on
+     which corpus/scale a label came from and absorbs each source's systematic bias;
+  2. a pairwise ranking signal (applied in the training loss), promoted to
+     co-primary because rank transfers across corpora/formats far better than scale.
 
-The difficulty model is the winner's encoder+regressor plus three upgrades:
-  1. regression head on the pooled hidden state (predict the score, never prompt
-     an LLM for a number);
-  2. per-source offset (label-aware / mixed-effects) so the model conditions on
-     which corpus/scale each label came from;
-  3. pairwise ranking head, promoted to co-primary -- rank transfers across
-     corpora/formats far better than absolute scale.
+torch/transformers are required here (only imported when you do modeling); peft is
+optional and imported lazily so a non-LoRA run needs no extra install.
 """
 
 from __future__ import annotations
 
 import numpy as np
+import torch
+import torch.nn as nn
+from transformers import AutoModel, AutoTokenizer
 
 
+# --------------------------------------------------------------------------- #
+# Embedder: sentence vectors for diverse selection + SE-filter neighbour match #
+# --------------------------------------------------------------------------- #
 class Embedder:
-    """Sentence embeddings for (a) diverse external-data selection -- the inverse
-    of the winner's nearest-neighbour-to-CLEAR retrieval -- and (b) the
-    difficulty-space nearest-neighbour bonus model."""
+    """Mean-pooled transformer embeddings. Used to (a) measure/sample for
+    diversity in the external pool and (b) match each pseudo-labeled snippet to
+    its nearest gold neighbour for the SE filter."""
 
     def __init__(self, backbone: str = "sentence-transformers/all-MiniLM-L6-v2",
                  max_length: int = 256, device: str | None = None) -> None:
-        import torch
-        from transformers import AutoModel, AutoTokenizer
-
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.tokenizer = AutoTokenizer.from_pretrained(backbone)
         self.model = AutoModel.from_pretrained(backbone).to(self.device).eval()
         self.max_length = max_length
 
-    def encode(self, texts: list[str], batch_size: int = 32) -> np.ndarray:
-        import torch
-
+    @torch.no_grad()
+    def encode(self, texts: list[str], batch_size: int = 64) -> np.ndarray:
         vecs = []
         for i in range(0, len(texts), batch_size):
             enc = self.tokenizer(texts[i:i + batch_size], padding=True, truncation=True,
                                  max_length=self.max_length, return_tensors="pt").to(self.device)
-            with torch.no_grad():
-                out = self.model(**enc)
+            out = self.model(**enc)
             mask = enc["attention_mask"].unsqueeze(-1).float()
             pooled = (out.last_hidden_state * mask).sum(1) / mask.sum(1).clamp(min=1e-9)
-            vecs.append(pooled.cpu().numpy())
+            vecs.append(pooled.float().cpu().numpy())
         return np.vstack(vecs)
 
 
-class DifficultyRegressor:
-    """Encoder backbone + regression head + per-source offset + pairwise head."""
-
+# --------------------------------------------------------------------------- #
+# DifficultyRegressor                                                          #
+# --------------------------------------------------------------------------- #
+class DifficultyRegressor(nn.Module):
     def __init__(self, backbone: str = "microsoft/deberta-v3-base", n_sources: int = 1,
-                 dropout: float = 0.1, use_pairwise_head: bool = True,
-                 use_source_offset: bool = True, peft: bool = False) -> None:
-        self.cfg = dict(backbone=backbone, n_sources=n_sources, dropout=dropout,
-                        use_pairwise_head=use_pairwise_head,
-                        use_source_offset=use_source_offset, peft=peft)
-        self._module = None  # built lazily on .build()
+                 dropout: float = 0.1, use_source_offset: bool = True) -> None:
+        super().__init__()
+        self.encoder = AutoModel.from_pretrained(backbone)
+        hidden = self.encoder.config.hidden_size
+        self.dropout = nn.Dropout(dropout)
+        self.head = nn.Linear(hidden, 1)
+        self.use_source_offset = use_source_offset
+        if use_source_offset:
+            self.source_offset = nn.Embedding(max(n_sources, 1), 1)
+            nn.init.zeros_(self.source_offset.weight)
 
-    def build(self):
-        """TODO (Phase 5): load AutoModel(backbone) [+ optional peft LoRA], pool
-        the last hidden state, score = Linear(hidden, 1)(pooled) +
-        source_offset[source_id]; pairwise head = BCE on the sign of score diffs."""
-        raise NotImplementedError(
-            "DifficultyRegressor.build() is a Phase-5 stub. The interface is fixed; "
-            "implement the torch module here.")
+    @staticmethod
+    def _mean_pool(last_hidden: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        m = mask.unsqueeze(-1).float()
+        return (last_hidden * m).sum(1) / m.sum(1).clamp(min=1e-9)
 
-    def __repr__(self) -> str:
-        return f"DifficultyRegressor({self.cfg})"
+    def forward(self, input_ids, attention_mask, source_id=None) -> torch.Tensor:
+        out = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+        pooled = self._mean_pool(out.last_hidden_state, attention_mask)
+        score = self.head(self.dropout(pooled)).squeeze(-1)
+        if self.use_source_offset and source_id is not None:
+            score = score + self.source_offset(source_id).squeeze(-1)
+        return score
+
+
+def apply_lora(model: DifficultyRegressor, r: int = 16, alpha: int = 32,
+               dropout: float = 0.05) -> DifficultyRegressor:
+    """Wrap the encoder in LoRA adapters (optional; needs `peft`). The head and
+    source offset stay fully trainable. On an H100 full fine-tuning is fine too --
+    this is here for cheaper/faster runs and big backbones."""
+    from peft import LoraConfig, get_peft_model
+
+    targets = ["query_proj", "key_proj", "value_proj", "dense",  # deberta
+               "query", "key", "value"]                           # bert/roberta
+    cfg = LoraConfig(r=r, lora_alpha=alpha, lora_dropout=dropout,
+                     target_modules=targets, bias="none")
+    model.encoder = get_peft_model(model.encoder, cfg)
+    return model
+
+
+def build_tokenizer(backbone: str) -> "AutoTokenizer":
+    return AutoTokenizer.from_pretrained(backbone)

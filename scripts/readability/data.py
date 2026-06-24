@@ -7,13 +7,14 @@ the single ``scripts/data_preprocessing.py`` entry point chains together.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Callable
 
 import numpy as np
 import pandas as pd
 
-from .schema import CANONICAL_COLUMNS, coerce
+from .schema import CANONICAL_COLUMNS, Record, coerce, records_to_frame
 from .utils import get_logger
 
 log = get_logger("data")
@@ -59,6 +60,90 @@ def load_clear(raw_path: str | Path) -> pd.DataFrame:
     return coerce(out)
 
 
+# OneStopEnglish reading levels -> ordinal native_label (higher = harder).
+ONESTOP_LEVELS = {"ele": 0, "int": 1, "adv": 2}
+
+
+def _read_text(path: Path) -> str:
+    """Read a text file, tolerating the corpus's mixed encodings."""
+    for enc in ("utf-8-sig", "latin-1"):
+        try:
+            return path.read_text(encoding=enc)
+        except UnicodeDecodeError:
+            continue
+    return path.read_text(encoding="utf-8", errors="replace")
+
+
+def window_text(text: str, *, target_words: int = 180, max_words: int = 320,
+                min_words: int = 50) -> list[str]:
+    """Split a long document into excerpt-sized chunks (~target_words), packing on
+    paragraph boundaries so chunks don't cut mid-sentence. Oversized paragraphs
+    are split on word count; a too-short trailing chunk is merged back.
+
+    Operates on one document at a time, so it streams to arbitrarily large corpora.
+    """
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if not paras:
+        return []
+    chunks: list[str] = []
+    buf: list[str] = []
+    buf_n = 0
+    for p in paras:
+        words = p.split()
+        if len(words) > max_words:                       # paragraph alone too big
+            if buf:
+                chunks.append(" ".join(buf)); buf, buf_n = [], 0
+            for i in range(0, len(words), target_words):
+                chunks.append(" ".join(words[i:i + target_words]))
+            continue
+        if buf_n and buf_n + len(words) > target_words:  # flush before overflow
+            chunks.append(" ".join(buf)); buf, buf_n = [], 0
+        buf.append(p); buf_n += len(words)
+    if buf:
+        chunks.append(" ".join(buf))
+    if len(chunks) >= 2 and len(chunks[-1].split()) < min_words:
+        chunks[-2] = chunks[-2] + " " + chunks.pop()     # absorb a short tail
+    return chunks
+
+
+def load_onestop(raw_dir: str | Path) -> pd.DataFrame:
+    """Load OneStopEnglish (a tree of *-ele/-int/-adv .txt files) into the unified
+    schema. Each article exists at three expert reading levels; we window every
+    article into excerpt-sized chunks that inherit its level.
+
+    native_label = ordinal level (0/1/2); std_error is NaN (expert levels carry no
+    per-item s.e.). format=prose, domain=informational (re-leveled news).
+    """
+    raw_dir = Path(raw_dir)
+    records: list[Record] = []
+    n_files = 0
+    for level, label in ONESTOP_LEVELS.items():
+        seen: set[str] = set()
+        # restrict to the level-separated texts; the repo ships a nested duplicate
+        # Int-Txt/Int-Txt copy, so dedup by filename to avoid loading each twice.
+        for fp in sorted(raw_dir.glob(f"**/Texts-SeparatedByReadingLevel/**/*-{level}.txt")):
+            if fp.name in seen:
+                continue
+            seen.add(fp.name)
+            n_files += 1
+            article = fp.stem.rsplit("-", 1)[0]
+            for ci, chunk in enumerate(window_text(_read_text(fp))):
+                records.append(Record(
+                    id=f"onestop:{article}:{level}:{ci}",
+                    text=chunk, corpus="onestop",
+                    native_label=float(label), native_scale="onestop_level",
+                    format_type="prose", domain="informational",
+                    language="en", license="CC-BY-SA-4.0",
+                ))
+    if n_files == 0:
+        raise FileNotFoundError(
+            f"no OneStopEnglish texts found under {raw_dir}. Expected a "
+            f"'Texts-SeparatedByReadingLevel/' tree with *-ele/-int/-adv.txt files.")
+    df = records_to_frame(records)
+    log.info("loaded OneStopEnglish: %d chunks from %d files", len(df), n_files)
+    return coerce(df)
+
+
 def _stub_loader(name: str) -> Callable[[str | Path], pd.DataFrame]:
     def _loader(raw_path: str | Path) -> pd.DataFrame:
         raise NotImplementedError(
@@ -74,7 +159,7 @@ def _stub_loader(name: str) -> Callable[[str | Path], pd.DataFrame]:
 # anchors; Tier-3 = unlabeled breadth incl. the special formats.
 REGISTRY: dict[str, Callable[[str | Path], pd.DataFrame]] = {
     "clear": load_clear,
-    "onestop": _stub_loader("onestop"),
+    "onestop": load_onestop,
     "newsela": _stub_loader("newsela"),
     "weebit": _stub_loader("weebit"),
     "cefr": _stub_loader("cefr"),
@@ -89,12 +174,29 @@ def load_corpus(name: str, raw_path: str | Path) -> pd.DataFrame:
     return REGISTRY[name](raw_path)
 
 
+def filter_corpus(df: pd.DataFrame, *, min_tokens: int = 3, max_tokens: int = 600,
+                  languages: tuple[str, ...] = ("en",)) -> pd.DataFrame:
+    """Phase-1 QC filters: drop empties, enforce a comparable length band so the
+    model can't learn length instead of difficulty, keep target languages, and
+    drop exact-duplicate texts within a corpus. Dedup is per (corpus, text), so
+    parallel levels (same article re-leveled) are preserved. Vectorized -> scales.
+    """
+    n0 = len(df)
+    df = df[df["text"].astype(str).str.strip().ne("")]
+    lt = pd.to_numeric(df["length_tokens"], errors="coerce")
+    df = df[(lt >= min_tokens) & (lt <= max_tokens)]
+    df = df[df["language"].isin(languages)]
+    df = df.drop_duplicates(subset=["corpus", "text"], keep="first")
+    log.info("filter_corpus: %d -> %d rows (min=%d max=%d)", n0, len(df), min_tokens, max_tokens)
+    return df.reset_index(drop=True)
+
+
 # --------------------------------------------------------------------------- #
 # 2. Harmonization: native labels -> open [0, 1] difficulty axis.            #
 # --------------------------------------------------------------------------- #
 # Guardrail: this axis only *merges* corpora; supervision/eval stay on the human
 # label. CLEAR's BT easiness is higher=EASIER, so its polarity is inverted.
-POLARITY = {"clear": False}   # higher native label == harder?
+POLARITY = {"clear": False, "onestop": True}   # higher native label == harder?
 
 
 def percentile_within_corpus(df: pd.DataFrame, *, label_col: str = "native_label",
@@ -155,12 +257,51 @@ def assign_splits(df: pd.DataFrame, *, holdout_corpora: list[str] | None = None,
     return out
 
 
-def group_kfold_indices(df: pd.DataFrame, *, group_col: str = "corpus",
-                        n_folds: int = 5):
-    """Folds that never split a group across folds (no cross-source leakage)."""
+def derive_group_id(df: pd.DataFrame) -> pd.Series:
+    """Leakage-safe grouping key derived from the row id.
+
+    Keeps every chunk AND every reading-level of one source article together so a
+    near-duplicate can't straddle the train/val boundary. ids are structured as
+    ``corpus:article:level:chunk`` (OneStopEnglish, 4 parts) or ``corpus:n``
+    (CLEAR, 2 parts); we collapse the former to ``corpus:article`` and leave flat
+    ids as their own group.
+    """
+    def base(rid: str) -> str:
+        parts = str(rid).split(":")
+        return ":".join(parts[:2]) if len(parts) >= 4 else str(rid)
+    return df["id"].map(base)
+
+
+def cv_folds(df: pd.DataFrame, *, group_by: str = "auto", n_folds: int = 5,
+             pool_splits: tuple[str, ...] = ("train", "val")):
+    """Yield leakage-safe (train_idx, val_idx) cross-validation folds.
+
+    ``group_by``:
+      "auto"   -> group by source article/passage (derive_group_id). The always-on
+                  integrity fix: OneStopEnglish's three reading-levels and every
+                  windowed chunk of one article stay inside a single fold.
+      "corpus" -> hold out an entire corpus per fold (cross-corpus transfer CV;
+                  needs >= n_folds corpora in the pool).
+      <column> -> group by that schema column.
+
+    Operates on the {train, val} pool only -- the gold ood_* holdout is never part
+    of CV. Raises if there are fewer groups than folds (the split would be invalid).
+    """
     from sklearn.model_selection import GroupKFold
 
-    pool = df[df["split"].isin({"train", "val"})]
+    pool = df[df["split"].isin(set(pool_splits))]
+    if group_by == "auto":
+        groups = derive_group_id(pool).to_numpy()
+    elif group_by in pool.columns:
+        groups = pool[group_by].astype(str).to_numpy()
+    else:
+        raise ValueError(f"group_by must be 'auto', 'corpus', or a column name; got '{group_by}'")
+
+    n_groups = len(set(groups))
+    if n_groups < n_folds:
+        raise ValueError(
+            f"only {n_groups} group(s) for group_by='{group_by}' but n_folds={n_folds}; "
+            f"use fewer folds, a finer group_by, or leave-one-group-out.")
     gkf = GroupKFold(n_splits=n_folds)
-    for tr, va in gkf.split(np.zeros(len(pool)), groups=pool[group_col].to_numpy()):
+    for tr, va in gkf.split(np.zeros(len(pool)), groups=groups):
         yield pool.index[tr].to_numpy(), pool.index[va].to_numpy()

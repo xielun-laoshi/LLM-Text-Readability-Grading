@@ -4,9 +4,11 @@ polarity, metrics, and the reference bracket. Run: ``pytest``."""
 import numpy as np
 import pandas as pd
 
-from readability.schema import CANONICAL_COLUMNS, Record, records_to_frame, validate
-from readability.data import percentile_within_corpus, POLARITY
+from readability.schema import CANONICAL_COLUMNS, Record, coerce, records_to_frame, validate
+from readability.data import percentile_within_corpus, POLARITY, derive_group_id, cv_folds
 from readability.evaluation import spearman, pairwise_accuracy, rmse, mean_predictor_rmse
+from readability.external import difficulty_proxy, select_diverse
+from readability.pseudolabel import clear_bt_to_axis, generate_pseudo_labels
 
 
 def _toy():
@@ -53,3 +55,65 @@ def test_metrics_basic():
 def test_mean_predictor_rmse_equals_std():
     y = pd.Series([1.0, 2.0, 3.0, 4.0, 5.0])
     assert abs(mean_predictor_rmse(y) - y.std(ddof=0)) < 1e-9
+
+
+def test_derive_group_id_collapses_onestop_levels():
+    df = pd.DataFrame({"id": ["onestop:Amazon:ele:0", "onestop:Amazon:adv:1", "clear:42"]})
+    g = derive_group_id(df).tolist()
+    # all reading-levels / chunks of one article share a group; flat ids stand alone
+    assert g[0] == g[1] == "onestop:Amazon"
+    assert g[2] == "clear:42"
+
+
+def test_cv_folds_never_leak_a_group():
+    # 10 articles x 3 reading-levels = 30 rows, 10 groups, 5 folds.
+    rows = [{"id": f"onestop:art{a}:{lvl}:0", "split": "train"}
+            for a in range(10) for lvl in ("ele", "int", "adv")]
+    df = pd.DataFrame(rows)
+    validated = []
+    for tr, va in cv_folds(df, group_by="auto", n_folds=5):
+        gtr = set(derive_group_id(df.loc[tr]))
+        gva = set(derive_group_id(df.loc[va]))
+        assert gtr.isdisjoint(gva)                       # no article on both sides
+        validated.append(gva)
+    # every article is validated exactly once across the folds
+    assert set().union(*validated) == {f"onestop:art{a}" for a in range(10)}
+
+
+# --- Phase 4: external pool + pseudo-labeling (torch-free logic) ------------ #
+def test_difficulty_proxy_orders_simple_below_complex():
+    simple = "The cat sat. The dog ran. I see it."
+    complex_ = "Notwithstanding the epistemological ramifications, the dissertation elucidated multifarious sociolinguistic considerations."
+    assert difficulty_proxy(complex_) > difficulty_proxy(simple)
+
+
+def test_select_diverse_caps_size_and_keeps_every_source():
+    rows = [{"id": f"{src}:{i}", "text": ("word " * (5 + i % 40)).strip(), "corpus": src}
+            for src in ("a", "b") for i in range(200)]
+    out = select_diverse(pd.DataFrame(rows), n_total=60, n_bins=5, seed=0)
+    assert len(out) <= 60
+    assert set(out["corpus"]) == {"a", "b"}            # diversity: both sources survive
+
+
+def test_clear_bt_to_axis_inverts_easiness():
+    gold = pd.DataFrame({"native_label": [-3.0, -1.0, 1.0],
+                         "harmonized_difficulty": [1.0, 0.5, 0.0]})
+    ax = clear_bt_to_axis(np.array([-3.0, 1.0]), gold)
+    assert ax[0] > ax[1]                               # very negative BT (hard) -> high difficulty
+
+
+def test_generate_pseudo_labels_se_filter_and_harmonize():
+    gold = coerce(pd.DataFrame({
+        "id": ["clear:1", "clear:2", "clear:3"], "text": ["a", "b", "c"], "corpus": "clear",
+        "native_label": [-2.0, 0.0, 1.0], "harmonized_difficulty": [0.9, 0.5, 0.1],
+        "std_error": [0.4, 0.4, 0.4]}))
+    pool = coerce(pd.DataFrame({"id": ["x:0", "x:1"], "text": ["p", "q"], "corpus": "x"}))
+    gold_emb = np.array([[1, 0], [0, 1], [1, 1]], float)
+    pool_emb = np.array([[1, 0.01], [0, 1.0]], float)  # x:0~clear:1(-2.0), x:1~clear:2(0.0)
+    teacher_preds = np.array([[-2.0, -2.1, -1.9],      # x:0 plausible vs neighbour -> keep
+                              [5.0, 5.1, 4.9]])         # x:1 implausible (|5-0|>se)  -> drop
+    out = generate_pseudo_labels(pool, gold, teacher_preds=teacher_preds,
+                                 pool_emb=pool_emb, gold_emb=gold_emb, k_se=1.0, max_std=1.0)
+    assert set(out["id"]) == {"x:0"}
+    assert bool(out["is_pseudo"].all())
+    assert 0.0 <= float(out["harmonized_difficulty"].iloc[0]) <= 1.0
