@@ -19,6 +19,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+from transformers import get_cosine_schedule_with_warmup
 
 from .config import Config
 from .evaluation import rmse, spearman
@@ -32,7 +33,7 @@ class _Rows(Dataset):
     def __init__(self, df: pd.DataFrame, target_col: str, source_map: dict[str, int]):
         self.text = df["text"].astype(str).tolist()
         self.y = pd.to_numeric(df[target_col], errors="coerce").to_numpy(dtype="float32")
-        self.src = df["corpus"].map(source_map).fillna(0).to_numpy(dtype="int64")
+        self.src = df["corpus"].map(source_map).fillna(source_map.get("__unk__", 0)).to_numpy(dtype="int64")
         w = pd.to_numeric(df.get("mapping_confidence", 1.0), errors="coerce").fillna(1.0)
         self.w = np.clip(w.to_numpy(dtype="float32"), 0.0, 1.0)
         self.ids = df["id"].astype(str).tolist()
@@ -94,7 +95,13 @@ class Trainer:
     def fit(self, train_df: pd.DataFrame, val_df: pd.DataFrame | None = None,
             run: RunLogger | None = None) -> "Trainer":
         tc = self.cfg.train
-        self.source_map = {c: i for i, c in enumerate(sorted(train_df["corpus"].unique()))}
+        corpora = sorted(train_df["corpus"].unique())
+        # Reserve an "__unk__" source whose offset stays ~0 (no training row maps to
+        # it, so it gets no gradient). Unseen corpora at predict time then get the
+        # population-mean offset instead of some seen corpus's bias -- keeps
+        # cross-corpus absolute error honest.
+        self.source_map = {c: i for i, c in enumerate(corpora)}
+        self.source_map["__unk__"] = len(corpora)
         self.model = DifficultyRegressor(self.backbone, n_sources=len(self.source_map),
                                          dropout=self.cfg.model.dropout,
                                          use_source_offset=self.cfg.model.use_source_offset)
@@ -104,9 +111,12 @@ class Trainer:
 
         opt = torch.optim.AdamW(self.model.parameters(), lr=tc.lr, weight_decay=tc.weight_decay)
         loader = self._loader(train_df, shuffle=True, batch_size=tc.batch_size)
-        log.info("teacher/student fit: backbone=%s rows=%d sources=%d device=%s target=%s",
-                 self.backbone, len(train_df), len(self.source_map), self.device, self.target_col)
+        total_steps = max(tc.epochs * len(loader), 1)
+        sched = get_cosine_schedule_with_warmup(opt, int(0.06 * total_steps), total_steps)
+        log.info("fit: backbone=%s rows=%d sources=%d device=%s target=%s steps=%d",
+                 self.backbone, len(train_df), len(corpora), self.device, self.target_col, total_steps)
 
+        best_rmse, best_state = float("inf"), None
         for epoch in range(tc.epochs):
             self.model.train()
             running = 0.0
@@ -120,16 +130,24 @@ class Trainer:
                     pair = _pairwise_loss(pred, y) * tc.pairwise_weight if self.cfg.model.use_pairwise_head else 0.0
                     loss = point + pair
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 opt.step()
+                sched.step()
                 running += float(loss) * len(y)
             msg = {"epoch": epoch + 1, "train_loss": running / len(train_df)}
             if val_df is not None and len(val_df):
                 vp = self.predict(val_df)["pred"].to_numpy()
                 vy = pd.to_numeric(val_df[self.target_col], errors="coerce").to_numpy()
                 msg["val_rmse"], msg["val_spearman"] = rmse(vy, vp), spearman(vy, vp)
+                if msg["val_rmse"] < best_rmse:          # keep the best epoch, not the last
+                    best_rmse = msg["val_rmse"]
+                    best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
             log.info("epoch %d | %s", epoch + 1, {k: round(v, 4) for k, v in msg.items() if k != "epoch"})
             if run:
                 run.log_metrics(msg, step=epoch + 1)
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+            log.info("restored best epoch (val_rmse=%.4f)", best_rmse)
         return self
 
     @torch.no_grad()

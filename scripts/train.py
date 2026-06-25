@@ -39,6 +39,19 @@ def main(argv: list[str] | None = None) -> int:
     log.info("student training table: %s (%d rows)", table, len(df))
     trainer = Trainer(cfg)  # target defaults to harmonized_difficulty
     trainer.fit(df[df["split"] == "train"], df[df["split"] == "val"], run=run)
+    trainer.save(Path(cfg.paths.artifacts) / "student")
+
+    # predict on the held-out rows (val = in-corpus, ood_* = cross-corpus/format)
+    # from the GOLD table, so evaluate.py can score the generalization number.
+    from readability.utils import artifacts_dir
+    gold = read_table(cfg.data.unified_table)
+    eval_rows = gold[gold["split"].isin(["val", "ood_corpus", "ood_format"])]
+    if len(eval_rows):
+        preds = trainer.predict(eval_rows)
+        out_p = artifacts_dir() / "student_preds.csv"
+        preds.to_csv(out_p, index=False)
+        log.info("wrote held-out predictions -> %s (%d rows)", out_p, len(preds))
+        log.info("score them with: python scripts/evaluate.py --predictions %s", out_p)
     return 0
 
 
