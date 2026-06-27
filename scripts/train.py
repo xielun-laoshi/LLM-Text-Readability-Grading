@@ -30,15 +30,14 @@ def main(argv: list[str] | None = None) -> int:
 
     from pathlib import Path
 
-    from readability.training import Trainer  # lazy import (pulls torch)
+    from readability.training import fit_student  # lazy import (pulls torch)
 
     # prefer the pseudo-augmented pool (gold + pseudo) if Phase 4 produced it
     table = cfg.pseudo.train_pool_table if Path(cfg.pseudo.train_pool_table).exists() \
         else cfg.data.unified_table
     df = read_table(table)
-    log.info("student training table: %s (%d rows)", table, len(df))
-    trainer = Trainer(cfg)  # target defaults to harmonized_difficulty
-    trainer.fit(df[df["split"] == "train"], df[df["split"] == "val"], run=run)
+    log.info("student training table: %s (%d rows) | two_stage=%s", table, len(df), cfg.train.two_stage)
+    trainer = fit_student(cfg, df, run=run)  # single-pass or two-stage per cfg.train.two_stage
     trainer.save(Path(cfg.paths.artifacts) / "student")
 
     # predict on the held-out rows (val = in-corpus, ood_* = cross-corpus/format)

@@ -67,6 +67,9 @@ class TrainConfig:
     pointwise_weight: float = 1.0
     pairwise_weight: float = 1.0
     confidence_weighting: bool = True
+    two_stage: bool = False          # strict pretrain-on-pseudo -> finetune-on-gold
+    pretrain_lr: float = 1.0e-5      # Stage A (pseudo) learning rate, lower than finetune
+    pretrain_epochs: int = 1
     seed: int = 42
 
 

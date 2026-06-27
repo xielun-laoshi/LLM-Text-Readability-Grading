@@ -27,6 +27,9 @@ ABLATIONS: dict[str, dict] = {
     "no_source_offset": {"overrides": ["model.use_source_offset=false"], "train_table": "train_pool"},
     "no_confidence_wt": {"overrides": ["train.confidence_weighting=false"], "train_table": "train_pool"},
     "no_pseudo":        {"overrides": [], "train_table": "gold"},   # gold only (data lever)
+    # additive variant: two-stage pretrain->finetune. A NEGATIVE delta vs full
+    # (single-pass) here means two-stage helped -> consider making it the default.
+    "two_stage":        {"overrides": ["train.two_stage=true"], "train_table": "train_pool"},
 }
 
 
@@ -38,10 +41,9 @@ def run_variant(cfg, train_df: pd.DataFrame, eval_df: pd.DataFrame, *,
     Returns (metrics dict, ids, preds, targets) -- preds/targets are kept so the
     runner can run a *paired* bootstrap between variants on the same items.
     """
-    from .training import Trainer
+    from .training import fit_student
 
-    trainer = Trainer(cfg, target_col=target_col)
-    trainer.fit(train_df[train_df["split"] == "train"], train_df[train_df["split"] == "val"])
+    trainer = fit_student(cfg, train_df, target_col=target_col)
 
     hold = eval_df[eval_df["split"] == holdout_split].copy()
     pr = trainer.predict(hold).set_index("id").reindex(hold["id"].astype(str))["pred"].to_numpy()

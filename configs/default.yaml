@@ -39,6 +39,9 @@ train:
   pointwise_weight: 1.0
   pairwise_weight: 1.0
   confidence_weighting: true
+  two_stage: false         # true -> pretrain on pseudo (pretrain_lr) then finetune on gold
+  pretrain_lr: 1.0e-5
+  pretrain_epochs: 1
   seed: 42
 
 external:                    # Phase 4: diverse unlabeled pool
