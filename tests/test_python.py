@@ -9,6 +9,7 @@ from readability.data import percentile_within_corpus, POLARITY, derive_group_id
 from readability.evaluation import spearman, pairwise_accuracy, rmse, mean_predictor_rmse
 from readability.external import difficulty_proxy, select_diverse
 from readability.pseudolabel import clear_bt_to_axis, generate_pseudo_labels
+from readability.ablation import aggregate, paired_bootstrap_diff
 
 
 def _toy():
@@ -117,3 +118,24 @@ def test_generate_pseudo_labels_se_filter_and_harmonize():
     assert set(out["id"]) == {"x:0"}
     assert bool(out["is_pseudo"].all())
     assert 0.0 <= float(out["harmonized_difficulty"].iloc[0]) <= 1.0
+
+
+# --- Phase 8: ablation significance + aggregation --------------------------- #
+def test_paired_bootstrap_detects_better_full():
+    rng = np.random.default_rng(0)
+    target = rng.normal(size=200)
+    pred_full = target + rng.normal(scale=0.3, size=200)   # strongly correlated
+    pred_variant = rng.normal(size=200)                    # ~uncorrelated
+    s = paired_bootstrap_diff(target, pred_full, pred_variant, n_boot=500)
+    assert s["delta"] > 0                                   # full ranks better
+    assert s["p_full_not_better"] < 0.05                   # and it's significant
+
+
+def test_aggregate_sorts_by_spearman_and_counts_seeds():
+    rows = [{"variant": "full", "seed": 42, "spearman": 0.80, "rmse": 0.30},
+            {"variant": "full", "seed": 43, "spearman": 0.82, "rmse": 0.29},
+            {"variant": "no_pairwise", "seed": 42, "spearman": 0.70, "rmse": 0.35},
+            {"variant": "no_pairwise", "seed": 43, "spearman": 0.72, "rmse": 0.34}]
+    agg = aggregate(rows)
+    assert agg["variant"].iloc[0] == "full"                # best mean Spearman first
+    assert int(agg.loc[agg["variant"] == "full", "seeds"].iloc[0]) == 2
