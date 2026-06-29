@@ -191,6 +191,25 @@ def filter_corpus(df: pd.DataFrame, *, min_tokens: int = 3, max_tokens: int = 60
     return df.reset_index(drop=True)
 
 
+def _norm_text(s: object) -> str:
+    return re.sub(r"\s+", " ", str(s).strip().lower())
+
+
+def dedup_against(df: pd.DataFrame, reference: pd.DataFrame, *, key: str = "text") -> pd.DataFrame:
+    """Drop rows of ``df`` whose normalized text exactly matches any reference text.
+
+    Integrity guard for pseudo-labeling: CLEAR is sourced from Gutenberg/Wikipedia --
+    the same pools we sample for the external set -- so external chunks can be
+    identical to gold/holdout passages. This removes those before they are pseudo-
+    labeled; the embedding SE-filter additionally catches near-duplicates."""
+    ref = set(reference[key].map(_norm_text))
+    keep = ~df[key].map(_norm_text).isin(ref)
+    n_drop = int((~keep).sum())
+    if n_drop:
+        log.info("dedup_against: dropped %d/%d rows matching reference text", n_drop, len(df))
+    return df[keep].reset_index(drop=True)
+
+
 # --------------------------------------------------------------------------- #
 # 2. Harmonization: native labels -> open [0, 1] difficulty axis.            #
 # --------------------------------------------------------------------------- #

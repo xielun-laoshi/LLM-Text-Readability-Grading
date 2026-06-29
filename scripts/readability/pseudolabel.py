@@ -40,18 +40,25 @@ def generate_pseudo_labels(
     gold_emb: np.ndarray,           # [n_gold, d] aligned to gold_clear rows
     k_se: float = 1.0,
     max_std: float | None = None,
+    dedup_cosine: float = 0.05,
 ) -> pd.DataFrame:
     """Pseudo-label + filter the external pool. Returns schema rows (is_pseudo=True,
     harmonized_difficulty filled, mapping_confidence from teacher agreement)."""
     from sklearn.neighbors import NearestNeighbors
 
+    n = len(pool_df)
     assert teacher_preds.ndim == 2, "teacher_preds must be [n_pool, K]"
+    assert teacher_preds.shape[0] == n == len(pool_emb), \
+        f"misaligned inputs: pool_df={n}, teacher_preds={teacher_preds.shape[0]}, pool_emb={len(pool_emb)}"
+    assert len(gold_clear) == len(gold_emb), \
+        f"gold misaligned: gold_clear={len(gold_clear)}, gold_emb={len(gold_emb)}"
     mean_pred = teacher_preds.mean(axis=1)
     std_pred = teacher_preds.std(axis=1)
 
-    # nearest gold neighbour (cosine) -> its label + standard error
+    # nearest gold neighbour (cosine) -> its label + standard error (+ near-dup distance)
     nn = NearestNeighbors(n_neighbors=1, metric="cosine").fit(gold_emb)
-    _, idx = nn.kneighbors(pool_emb)
+    dist, idx = nn.kneighbors(pool_emb)
+    near_dup = dist[:, 0] < dedup_cosine          # near-identical to a gold passage
     neigh = gold_clear.iloc[idx[:, 0]]
     neigh_label = pd.to_numeric(neigh["native_label"], errors="coerce").to_numpy()
     fallback_se = float(pd.to_numeric(gold_clear["std_error"], errors="coerce").mean())
@@ -63,9 +70,9 @@ def generate_pseudo_labels(
     if max_std is None:
         max_std = float(np.median(std_pred))
     keep_dis = std_pred <= max_std
-    keep = keep_se & keep_dis
-    log.info("pseudo-label gates: SE kept %d, disagreement kept %d, both %d / %d",
-             int(keep_se.sum()), int(keep_dis.sum()), int(keep.sum()), len(pool_df))
+    keep = keep_se & keep_dis & ~near_dup
+    log.info("pseudo-label gates: SE kept %d, agree kept %d, near-dup dropped %d -> kept %d / %d",
+             int(keep_se.sum()), int(keep_dis.sum()), int(near_dup.sum()), int(keep.sum()), len(pool_df))
 
     out = pool_df.iloc[np.where(keep)[0]].copy()
     out["native_label"] = mean_pred[keep]
