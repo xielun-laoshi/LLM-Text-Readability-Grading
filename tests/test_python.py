@@ -59,6 +59,15 @@ def test_mean_predictor_rmse_equals_std():
     assert abs(mean_predictor_rmse(y) - y.std(ddof=0)) < 1e-9
 
 
+def test_rank_rmse_is_scale_invariant():
+    from readability.evaluation import rank_rmse
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    p = 10 * y + 100                      # perfect ranking, wildly different scale
+    assert rank_rmse(y, p) < 1e-9         # scale-free: sees the perfect ranking
+    assert rmse(y, p) > 100               # raw RMSE is huge and would mislead cross-corpus
+    assert rank_rmse(y, y[::-1].copy()) > rank_rmse(y, p)   # reversed ranking is worse
+
+
 def test_derive_group_id_collapses_onestop_levels():
     df = pd.DataFrame({"id": ["onestop:Amazon:ele:0", "onestop:Amazon:adv:1", "clear:42"]})
     g = derive_group_id(df).tolist()

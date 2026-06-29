@@ -62,8 +62,11 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         res = score_against_bracket(merged, "pred", target_col=args.target, group_col=args.group_col)
         print(f"Model scored against '{args.target}', by '{args.group_col}' "
-              f"(rank metrics lead; ood_* rows are the generalization number):\n")
+              f"(ood_* rows are the generalization number):\n")
         print(res.to_string(index=False))
+        print("\n  scale-free (use cross-corpus): spearman, kendall, pairwise_acc, rank_rmse"
+              "\n  in-scale only (meaningful when pred & target share a ruler, i.e. in-corpus):"
+              " rmse, mae, mean_signed_error")
     return 0
 
 

@@ -74,11 +74,26 @@ def pairwise_accuracy(y_true, y_pred, *, max_pairs: int = 200_000, seed: int = 4
     return float(np.mean(dt[valid] == dp[valid])) if valid.sum() else float("nan")
 
 
+def rank_rmse(y_true, y_pred) -> float:
+    """Scale-free absolute error: RMSE between the within-set percentile ranks of
+    target and prediction. Valid CROSS-corpus -- both sides are [0,1] ranks -- unlike
+    raw RMSE, which is meaningless when pred and target live on different rulers
+    (e.g. a CLEAR-axis prediction vs a per-corpus percentile target)."""
+    yt, yp = _clean(y_true, y_pred)
+    if len(yt) < 2:
+        return float("nan")
+    rt = pd.Series(yt).rank(pct=True).to_numpy()
+    rp = pd.Series(yp).rank(pct=True).to_numpy()
+    return float(np.sqrt(np.mean((rt - rp) ** 2)))
+
+
 def score_predictions(y_true, y_pred) -> dict[str, float]:
+    # scale-free metrics first (valid cross-corpus), then in-scale metrics.
     return {
         "spearman": spearman(y_true, y_pred),
         "kendall": kendall(y_true, y_pred),
         "pairwise_acc": pairwise_accuracy(y_true, y_pred),
+        "rank_rmse": rank_rmse(y_true, y_pred),
         "rmse": rmse(y_true, y_pred),
         "mae": mae(y_true, y_pred),
         "mean_signed_error": mean_signed_error(y_true, y_pred),
