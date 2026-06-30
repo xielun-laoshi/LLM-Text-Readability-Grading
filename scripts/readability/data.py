@@ -144,6 +144,33 @@ def load_onestop(raw_dir: str | Path) -> pd.DataFrame:
     return coerce(df)
 
 
+# CEFR proficiency levels -> ordinal native_label (higher = harder).
+CEFR_LEVELS = {"A1": 0, "A2": 1, "B1": 2, "B2": 3, "C1": 4, "C2": 5}
+
+
+def load_cefr(raw_path: str | Path) -> pd.DataFrame:
+    """Load the CEFR Levelled English Texts CSV (columns text,label) into the
+    unified schema. A *second* cross-corpus holdout, distinct in source from CLEAR
+    and OneStopEnglish, with a finer 6-level target (A1..C2 -> 0..5). Texts are
+    windowed to excerpt size; std_error is NaN (no per-item noise)."""
+    df = pd.read_csv(raw_path)
+    records: list[Record] = []
+    for ri, row in enumerate(df.itertuples(index=False)):
+        level = str(getattr(row, "label", "")).strip().upper()
+        if level not in CEFR_LEVELS:
+            continue
+        for ci, chunk in enumerate(window_text(str(getattr(row, "text", "")))):
+            records.append(Record(id=f"cefr:{level}:{ri}:{ci}", text=chunk, corpus="cefr",
+                                  native_label=float(CEFR_LEVELS[level]), native_scale="cefr_level",
+                                  format_type="prose", domain="mixed", language="en",
+                                  license="research"))
+    if not records:
+        raise ValueError(f"no CEFR rows parsed from {raw_path} (expected columns text,label)")
+    out = records_to_frame(records)
+    log.info("loaded CEFR: %d chunks from %d texts", len(out), len(df))
+    return coerce(out)
+
+
 def _stub_loader(name: str) -> Callable[[str | Path], pd.DataFrame]:
     def _loader(raw_path: str | Path) -> pd.DataFrame:
         raise NotImplementedError(
@@ -160,9 +187,9 @@ def _stub_loader(name: str) -> Callable[[str | Path], pd.DataFrame]:
 REGISTRY: dict[str, Callable[[str | Path], pd.DataFrame]] = {
     "clear": load_clear,
     "onestop": load_onestop,
+    "cefr": load_cefr,
     "newsela": _stub_loader("newsela"),
     "weebit": _stub_loader("weebit"),
-    "cefr": _stub_loader("cefr"),
     "wiki_simple": _stub_loader("wiki_simple"),
     "gutenberg_poetry": _stub_loader("gutenberg_poetry"),
 }
@@ -215,7 +242,7 @@ def dedup_against(df: pd.DataFrame, reference: pd.DataFrame, *, key: str = "text
 # --------------------------------------------------------------------------- #
 # Guardrail: this axis only *merges* corpora; supervision/eval stay on the human
 # label. CLEAR's BT easiness is higher=EASIER, so its polarity is inverted.
-POLARITY = {"clear": False, "onestop": True}   # higher native label == harder?
+POLARITY = {"clear": False, "onestop": True, "cefr": True}   # higher native label == harder?
 
 
 def percentile_within_corpus(df: pd.DataFrame, *, label_col: str = "native_label",

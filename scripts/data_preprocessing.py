@@ -42,6 +42,8 @@ RAW_SOURCES = {
               "file": "CLEAR.csv"},
     "onestop": {"url": "https://github.com/nishkalavallabhi/OneStopEnglishCorpus/archive/refs/heads/master.zip",
                 "dir": "onestop", "archive": "zip"},
+    "cefr": {"url": "https://raw.githubusercontent.com/AMontgomerie/CEFR-English-Level-Predictor/main/data/cefr_leveled_texts.csv",
+             "file": "cefr.csv"},
     "newsela": {"url": None, "dir": "newsela"},      # newsela.com/data (free, on request)
     "weebit": {"url": None, "dir": "weebit"},        # request from authors
     "gutenberg_poetry": {"url": None, "dir": "gutenberg_poetry"},  # Project Gutenberg

@@ -91,6 +91,16 @@ def test_cv_folds_never_leak_a_group():
     assert set().union(*validated) == {f"onestop:art{a}" for a in range(10)}
 
 
+def test_load_cefr_maps_levels(tmp_path):
+    from readability.data import load_cefr
+    csv = tmp_path / "cefr.csv"
+    csv.write_text("text,label\nThe cat sat on the mat.,A1\n"
+                   "Notwithstanding the epistemological ramifications elucidated.,C2\n", encoding="utf-8")
+    out = load_cefr(csv)
+    assert set(out["corpus"]) == {"cefr"}
+    assert out["native_label"].min() == 0.0 and out["native_label"].max() == 5.0  # A1->0, C2->5
+
+
 # --- Phase 4: external pool + pseudo-labeling (torch-free logic) ------------ #
 def test_difficulty_proxy_orders_simple_below_complex():
     simple = "The cat sat. The dog ran. I see it."
