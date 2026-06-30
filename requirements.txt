@@ -5,6 +5,7 @@ pandas==2.2.2
 scipy==1.14.0
 scikit-learn==1.5.1
 PyYAML==6.0.2
+openpyxl>=3.1         # read the upstream CLEAR_corpus_final.xlsx
 
 # Modeling — Phases 4-6 (teacher, pseudo-labeling, student).
 # torch is installed SEPARATELY with a CUDA build to use the GPU, e.g.:

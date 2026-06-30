@@ -28,7 +28,7 @@ import pandas as pd
 # scripts/ is on sys.path[0] when this file is run directly, so `readability`
 # (the support lib at scripts/readability/) imports without any install step.
 from readability.config import load_config
-from readability.data import assign_splits, filter_corpus, harmonize, load_corpus
+from readability.data import assign_splits, filter_corpus, find_clear, harmonize, load_corpus
 from readability.schema import CANONICAL_COLUMNS, coerce, validate, write_table
 from readability.utils import artifacts_dir, data_dir, get_logger, seed_everything
 
@@ -38,8 +38,8 @@ log = get_logger("preprocess")
 # <local target under data/>, "archive": "zip" (optional)}.  url=None => a
 # manual/licensed source (documented, not auto-fetched).
 RAW_SOURCES = {
-    "clear": {"url": "https://raw.githubusercontent.com/scrosseye/CLEAR-Corpus/main/CLEAR_corpus_final.csv",
-              "file": "CLEAR.csv"},
+    "clear": {"url": "https://raw.githubusercontent.com/scrosseye/CLEAR-Corpus/main/CLEAR_corpus_final.xlsx",
+              "file": "CLEAR.xlsx"},   # upstream ships only .xlsx; read_clear handles it
     "onestop": {"url": "https://github.com/nishkalavallabhi/OneStopEnglishCorpus/archive/refs/heads/master.zip",
                 "dir": "onestop", "archive": "zip"},
     "cefr": {"url": "https://raw.githubusercontent.com/AMontgomerie/CEFR-English-Level-Predictor/main/data/cefr_leveled_texts.csv",
@@ -52,6 +52,8 @@ RAW_SOURCES = {
 
 def local_raw_path(corpus: str) -> Path:
     """Where this corpus's raw data lives under data/ (a file or a directory)."""
+    if corpus == "clear":
+        return find_clear(data_dir())   # prefer an existing CLEAR.csv over the downloaded xlsx
     spec = RAW_SOURCES[corpus]
     return data_dir() / (spec["file"] if "file" in spec else spec["dir"])
 

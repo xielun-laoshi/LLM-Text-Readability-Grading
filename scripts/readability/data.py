@@ -23,14 +23,46 @@ log = get_logger("data")
 # --------------------------------------------------------------------------- #
 # 1. Loaders: each maps one raw source into the unified schema.               #
 # --------------------------------------------------------------------------- #
+# CLEAR ships upstream as CLEAR_corpus_final.xlsx (scrosseye/CLEAR-Corpus, main)
+# with drifted column names and NO winner-prediction columns; the AI4ALL team's
+# CSV uses the canonical names. These aliases normalize whichever file is present.
+CLEAR_COLUMN_ALIASES = {
+    "BT_easiness": "BT Easiness",
+    "s.e.": "BT s.e.",
+    "Categ": "Category",
+}
+
+
+def find_clear(data_dir_path: str | Path) -> Path:
+    """Locate the local CLEAR file, preferring an existing CSV (e.g. a manually
+    materialized one) over the downloaded xlsx."""
+    d = Path(data_dir_path)
+    for name in ("CLEAR.csv", "CLEAR.xlsx"):
+        if (d / name).exists():
+            return d / name
+    return d / "CLEAR.xlsx"
+
+
+def read_clear(path: str | Path) -> pd.DataFrame:
+    """Read CLEAR from .xlsx or .csv and normalize drifted column names
+    (BT_easiness/s.e./Categ -> BT Easiness/BT s.e./Category). xlsx needs openpyxl."""
+    path = Path(path)
+    df = pd.read_excel(path) if path.suffix.lower() in (".xlsx", ".xls") else pd.read_csv(path)
+    rename = {a: c for a, c in CLEAR_COLUMN_ALIASES.items() if a in df.columns and c not in df.columns}
+    if rename:
+        df = df.rename(columns=rename)
+        log.info("read_clear: aliased columns %s", rename)
+    return df
+
+
 def load_clear(raw_path: str | Path) -> pd.DataFrame:
-    """Load the CLEAR corpus CSV into the unified schema.
+    """Load the CLEAR corpus (.csv or .xlsx) into the unified schema.
 
     Keeps the human BT easiness as ``native_label`` and ``BT s.e.`` as
     ``std_error``. Reference columns (formulas, winner preds) stay in the raw
     file -- the eval harness reads them directly from there.
     """
-    df = pd.read_csv(raw_path)
+    df = read_clear(raw_path)
     cat = df.get("Category", pd.Series(index=df.index, dtype="object")).astype(str).str.lower()
     domain = cat.map({"lit": "literary", "info": "informational"}).fillna("unknown")
     # CLEAR's ID column parses as float (some rows have no ID); format as a clean

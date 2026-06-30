@@ -21,6 +21,7 @@ import sys
 import pandas as pd
 
 from readability.config import load_config
+from readability.data import find_clear, read_clear
 from readability.evaluation import compute_reference_bracket, score_against_bracket
 from readability.schema import read_table
 from readability.utils import data_dir, get_logger
@@ -43,7 +44,7 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
-    clear = pd.read_csv(args.clear or str(data_dir() / "CLEAR.csv"))
+    clear = read_clear(args.clear or find_clear(data_dir()))
 
     bracket = compute_reference_bracket(
         clear, target_col=cfg.eval.target_col, se_col=cfg.eval.se_col,

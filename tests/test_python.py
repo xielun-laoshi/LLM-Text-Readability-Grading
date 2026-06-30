@@ -91,6 +91,15 @@ def test_cv_folds_never_leak_a_group():
     assert set().union(*validated) == {f"onestop:art{a}" for a in range(10)}
 
 
+def test_read_clear_aliases_drifted_columns(tmp_path):
+    from readability.data import read_clear
+    csv = tmp_path / "clear.csv"
+    csv.write_text("ID,Excerpt,BT_easiness,s.e.,Categ\n1,hello world,-0.5,0.4,Lit\n", encoding="utf-8")
+    df = read_clear(csv)  # upstream names should be aliased to canonical
+    assert {"BT Easiness", "BT s.e.", "Category"} <= set(df.columns)
+    assert df["BT Easiness"].iloc[0] == -0.5
+
+
 def test_load_cefr_maps_levels(tmp_path):
     from readability.data import load_cefr
     csv = tmp_path / "cefr.csv"
