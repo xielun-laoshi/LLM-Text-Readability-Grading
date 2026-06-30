@@ -21,14 +21,30 @@ from .utils import get_logger
 log = get_logger("pseudolabel")
 
 
-def clear_bt_to_axis(preds: np.ndarray, gold_clear: pd.DataFrame) -> np.ndarray:
-    """Map native CLEAR-BT predictions onto the open [0,1] difficulty axis using
-    CLEAR gold's own (native_label -> harmonized_difficulty) relationship, so
-    pseudo-labels land on the same ruler as everything else."""
+def clear_bt_to_axis(preds: np.ndarray, gold_clear: pd.DataFrame, *,
+                     extrapolate: bool = True) -> np.ndarray:
+    """Map native CLEAR-BT predictions onto the open difficulty axis using CLEAR
+    gold's own (native_label -> harmonized_difficulty) relationship.
+
+    Beyond CLEAR's BT range we LINEARLY EXTRAPOLATE from the tail slope rather than
+    clamp, so text harder/easier than anything in CLEAR keeps a distinct, ordered
+    value instead of being flattened onto the boundary -- preserving discrimination
+    exactly where a diverse pool needs it. Extrapolated values may fall modestly
+    outside [0, 1]; out-of-range pseudo-labels are separately down-weighted (the
+    teacher is extrapolating there too)."""
     g = gold_clear.dropna(subset=["native_label", "harmonized_difficulty"]).sort_values("native_label")
     xs = g["native_label"].to_numpy(dtype="float64")
     ys = g["harmonized_difficulty"].to_numpy(dtype="float64")
-    return np.clip(np.interp(np.asarray(preds, dtype="float64"), xs, ys), 0.0, 1.0)
+    p = np.asarray(preds, dtype="float64")
+    out = np.interp(p, xs, ys)                       # interpolates inside, clamps outside
+    if not extrapolate or len(xs) < 2:
+        return np.clip(out, 0.0, 1.0)
+    s_lo = (ys[1] - ys[0]) / (xs[1] - xs[0]) if xs[1] != xs[0] else 0.0
+    s_hi = (ys[-1] - ys[-2]) / (xs[-1] - xs[-2]) if xs[-1] != xs[-2] else 0.0
+    lo, hi = p < xs[0], p > xs[-1]
+    out[lo] = ys[0] + s_lo * (p[lo] - xs[0])
+    out[hi] = ys[-1] + s_hi * (p[hi] - xs[-1])
+    return out
 
 
 def generate_pseudo_labels(
@@ -41,6 +57,7 @@ def generate_pseudo_labels(
     k_se: float = 1.0,
     max_std: float | None = None,
     dedup_cosine: float = 0.05,
+    extrapolate: bool = True,
 ) -> pd.DataFrame:
     """Pseudo-label + filter the external pool. Returns schema rows (is_pseudo=True,
     harmonized_difficulty filled, mapping_confidence from teacher agreement)."""
@@ -77,10 +94,20 @@ def generate_pseudo_labels(
     out = pool_df.iloc[np.where(keep)[0]].copy()
     out["native_label"] = mean_pred[keep]
     out["native_scale"] = "clear_bt_pseudo"
-    out["harmonized_difficulty"] = clear_bt_to_axis(mean_pred[keep], gold_clear)
+    out["harmonized_difficulty"] = clear_bt_to_axis(mean_pred[keep], gold_clear, extrapolate=extrapolate)
     out["mapping_method"] = "pseudo_teacher"
-    out["mapping_confidence"] = 1.0 / (1.0 + std_pred[keep])   # agreement -> weight
+    # confidence = teacher agreement, down-weighted where the teacher EXTRAPOLATES
+    # beyond CLEAR's BT range (its label is least trustworthy out there).
+    gold_native = pd.to_numeric(gold_clear["native_label"], errors="coerce")
+    lo_bt, hi_bt = float(gold_native.min()), float(gold_native.max())
+    width = max(hi_bt - lo_bt, 1e-9)
+    over = np.maximum(0.0, np.maximum(lo_bt - mean_pred[keep], mean_pred[keep] - hi_bt))
+    out["mapping_confidence"] = (1.0 / (1.0 + std_pred[keep])) * (1.0 / (1.0 + over / width))
     out["std_error"] = std_pred[keep]
     out["is_pseudo"] = True
     out["split"] = "train"
+    n_extrap = int((over > 0).sum())
+    if n_extrap:
+        log.info("out-of-range pseudo-labels down-weighted (teacher extrapolating): %d / %d kept",
+                 n_extrap, len(out))
     return coerce(out)

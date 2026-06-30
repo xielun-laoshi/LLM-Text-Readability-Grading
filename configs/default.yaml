@@ -61,6 +61,7 @@ pseudo:                      # Phase 4: pseudo-label filtering + merge
   k_se: 1.0                  # keep |pred - neighbour| <= k_se * neighbour s.e.
   max_std: null              # disagreement gate (null -> median split)
   dedup_cosine: 0.05         # drop pool chunks within this cosine dist of a gold passage
+  extrapolate: true          # extrapolate the axis beyond CLEAR's range (vs clamp)
   embed_backbone: sentence-transformers/all-MiniLM-L6-v2
   out_table: artifacts/pseudo_labeled.csv
   train_pool_table: artifacts/train_pool.csv

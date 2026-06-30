@@ -66,7 +66,8 @@ def main(argv: list[str] | None = None) -> int:
     # 3. filter + harmonize
     pseudo = generate_pseudo_labels(pool, gold, teacher_preds=teacher_preds,
                                     pool_emb=pool_emb, gold_emb=gold_emb,
-                                    k_se=pc.k_se, max_std=pc.max_std, dedup_cosine=pc.dedup_cosine)
+                                    k_se=pc.k_se, max_std=pc.max_std, dedup_cosine=pc.dedup_cosine,
+                                    extrapolate=pc.extrapolate)
     write_table(pseudo.reindex(columns=CANONICAL_COLUMNS), pc.out_table)
 
     # 4. merged training pool: gold (train/val) + pseudo

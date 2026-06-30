@@ -113,6 +113,28 @@ def test_clear_bt_to_axis_inverts_easiness():
     assert ax[0] > ax[1]                               # very negative BT (hard) -> high difficulty
 
 
+def test_clear_bt_to_axis_extrapolates_not_clamps():
+    gold = pd.DataFrame({"native_label": [-2.0, 0.0, 2.0], "harmonized_difficulty": [0.9, 0.5, 0.1]})
+    ax = clear_bt_to_axis(np.array([-2.0, -3.0, -4.0]), gold, extrapolate=True)
+    assert ax[1] > ax[0] and ax[2] > ax[1]             # harder-than-CLEAR stays ordered, not flattened
+    assert ax[2] > 0.9                                 # extrapolated beyond the boundary
+    clamped = clear_bt_to_axis(np.array([-3.0, -4.0]), gold, extrapolate=False)
+    assert clamped[0] == clamped[1] == 0.9             # clamp flattens both onto the boundary
+
+
+def test_generate_pseudo_labels_downweights_out_of_range():
+    gold = coerce(pd.DataFrame({"id": ["clear:1", "clear:2"], "text": ["a", "b"], "corpus": "clear",
+                                "native_label": [-1.0, 1.0], "harmonized_difficulty": [0.9, 0.1],
+                                "std_error": [0.5, 0.5]}))
+    pool = coerce(pd.DataFrame({"id": ["in:0", "out:0"], "text": ["p", "q"], "corpus": "x"}))
+    gold_emb = np.array([[1.0, 0.0], [0.0, 1.0]]); pool_emb = np.array([[1.0, 0.3], [0.3, 1.0]])
+    teacher_preds = np.array([[0.0, 0.0, 0.0], [5.0, 5.0, 5.0]])  # in-range vs far out of CLEAR's range
+    out = generate_pseudo_labels(pool, gold, teacher_preds=teacher_preds, pool_emb=pool_emb,
+                                 gold_emb=gold_emb, k_se=100.0, max_std=10.0, dedup_cosine=0.0)
+    cmap = dict(zip(out["id"], out["mapping_confidence"]))
+    assert cmap["out:0"] < cmap["in:0"]               # teacher extrapolating -> lower confidence
+
+
 def test_generate_pseudo_labels_se_filter_and_harmonize():
     gold = coerce(pd.DataFrame({
         "id": ["clear:1", "clear:2", "clear:3"], "text": ["a", "b", "c"], "corpus": "clear",
