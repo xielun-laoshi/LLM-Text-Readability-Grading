@@ -109,9 +109,11 @@ def validate(df: pd.DataFrame, *, strict: bool = True) -> list[str]:
     if bad_split:
         issues.append(f"unknown split values: {sorted(bad_split)}")
     hd = pd.to_numeric(df["harmonized_difficulty"], errors="coerce")
-    n_oob = int(((hd < 0) | (hd > 1)).sum())
+    # gold harmonization is a [0,1] percentile; pseudo-labels may extrapolate modestly
+    # beyond it, so only flag values far outside the band (a sign of a real error).
+    n_oob = int(((hd < -0.5) | (hd > 1.5)).sum())
     if n_oob:
-        issues.append(f"{n_oob} harmonized_difficulty outside [0, 1]")
+        issues.append(f"{n_oob} harmonized_difficulty far outside [0, 1]")
     if strict and issues:
         raise ValueError("schema validation failed: " + "; ".join(issues))
     return issues

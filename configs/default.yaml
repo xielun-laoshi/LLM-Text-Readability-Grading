@@ -9,7 +9,7 @@ paths:
   runs: runs
 
 data:
-  corpora: [clear, onestop]
+  corpora: [clear, onestop, cefr]
   unified_table: artifacts/corpus.csv
   min_tokens: 3
   max_tokens: 600
@@ -39,6 +39,9 @@ train:
   pointwise_weight: 1.0
   pairwise_weight: 1.0
   confidence_weighting: true
+  two_stage: false         # true -> pretrain on pseudo (pretrain_lr) then finetune on gold
+  pretrain_lr: 1.0e-5
+  pretrain_epochs: 1
   seed: 42
 
 external:                    # Phase 4: diverse unlabeled pool
@@ -57,6 +60,8 @@ teacher:                     # Phase 4: teacher ensemble (predicts CLEAR BT)
 pseudo:                      # Phase 4: pseudo-label filtering + merge
   k_se: 1.0                  # keep |pred - neighbour| <= k_se * neighbour s.e.
   max_std: null              # disagreement gate (null -> median split)
+  dedup_cosine: 0.05         # drop pool chunks within this cosine dist of a gold passage
+  extrapolate: true          # extrapolate the axis beyond CLEAR's range (vs clamp)
   embed_backbone: sentence-transformers/all-MiniLM-L6-v2
   out_table: artifacts/pseudo_labeled.csv
   train_pool_table: artifacts/train_pool.csv

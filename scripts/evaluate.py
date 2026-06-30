@@ -22,6 +22,7 @@ import pandas as pd
 
 from readability.config import load_config
 from readability.evaluation import compute_reference_bracket, score_against_bracket
+from readability.schema import read_table
 from readability.utils import data_dir, get_logger
 
 log = get_logger("evaluate")
@@ -32,14 +33,17 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default="configs/default.yaml")
     ap.add_argument("--clear", default=None, help="raw CLEAR csv (default: data/CLEAR.csv)")
-    ap.add_argument("--predictions", default=None,
-                    help="predictions table (id,pred) to score against CLEAR")
-    ap.add_argument("--group-col", default="corpus")
+    ap.add_argument("--predictions", default=None, help="model predictions (id,pred) to score")
+    ap.add_argument("--table", default=None,
+                    help="unified table to join predictions against (default: cfg.data.unified_table)")
+    ap.add_argument("--target", default="harmonized_difficulty",
+                    help="column predictions are scored against")
+    ap.add_argument("--group-col", default="split",
+                    help="break results down by this column (split, corpus, ...)")
     args = ap.parse_args(argv)
 
     cfg = load_config(args.config)
-    clear_path = args.clear or str(data_dir() / "CLEAR.csv")
-    clear = pd.read_csv(clear_path)
+    clear = pd.read_csv(args.clear or str(data_dir() / "CLEAR.csv"))
 
     bracket = compute_reference_bracket(
         clear, target_col=cfg.eval.target_col, se_col=cfg.eval.se_col,
@@ -48,11 +52,21 @@ def main(argv: list[str] | None = None) -> int:
     print("\n" + bracket.to_text() + "\n")
 
     if args.predictions:
+        # Score a model's predictions on the open axis, broken down by split, so the
+        # ood_corpus / ood_format rows give the cross-corpus / cross-format number.
         preds = pd.read_csv(args.predictions)
-        merged = clear.merge(preds, left_on="ID", right_on="id", how="inner")
-        table = score_against_bracket(merged, "pred", target_col=cfg.eval.target_col,
-                                      group_col=args.group_col)
-        print(table.to_string(index=False))
+        table = read_table(args.table or cfg.data.unified_table)
+        merged = table.merge(preds[["id", "pred"]], on="id", how="inner")
+        if merged.empty:
+            log.warning("no id overlap between predictions and the table")
+            return 0
+        res = score_against_bracket(merged, "pred", target_col=args.target, group_col=args.group_col)
+        print(f"Model scored against '{args.target}', by '{args.group_col}' "
+              f"(ood_* rows are the generalization number):\n")
+        print(res.to_string(index=False))
+        print("\n  scale-free (use cross-corpus): spearman, kendall, pairwise_acc, rank_rmse"
+              "\n  in-scale only (meaningful when pred & target share a ruler, i.e. in-corpus):"
+              " rmse, mae, mean_signed_error")
     return 0
 
 

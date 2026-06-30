@@ -19,6 +19,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
+from transformers import get_cosine_schedule_with_warmup
 
 from .config import Config
 from .evaluation import rmse, spearman
@@ -29,12 +30,16 @@ log = get_logger("training")
 
 
 class _Rows(Dataset):
-    def __init__(self, df: pd.DataFrame, target_col: str, source_map: dict[str, int]):
+    def __init__(self, df: pd.DataFrame, target_col: str, source_map: dict[str, int],
+                 use_conf_weight: bool = True):
         self.text = df["text"].astype(str).tolist()
         self.y = pd.to_numeric(df[target_col], errors="coerce").to_numpy(dtype="float32")
-        self.src = df["corpus"].map(source_map).fillna(0).to_numpy(dtype="int64")
-        w = pd.to_numeric(df.get("mapping_confidence", 1.0), errors="coerce").fillna(1.0)
-        self.w = np.clip(w.to_numpy(dtype="float32"), 0.0, 1.0)
+        self.src = df["corpus"].map(source_map).fillna(source_map.get("__unk__", 0)).to_numpy(dtype="int64")
+        if use_conf_weight:
+            w = pd.to_numeric(df.get("mapping_confidence", 1.0), errors="coerce").fillna(1.0)
+            self.w = np.clip(w.to_numpy(dtype="float32"), 0.0, 1.0)
+        else:
+            self.w = np.ones(len(self.text), dtype="float32")
         self.ids = df["id"].astype(str).tolist()
 
     def __len__(self) -> int:
@@ -81,7 +86,8 @@ class Trainer:
         return (enc, torch.tensor(ys), torch.tensor(srcs), torch.tensor(ws), list(ids))
 
     def _loader(self, df, *, shuffle: bool, batch_size: int) -> DataLoader:
-        ds = _Rows(df, self.target_col, self.source_map)
+        ds = _Rows(df, self.target_col, self.source_map,
+                   use_conf_weight=self.cfg.train.confidence_weighting)
         return DataLoader(ds, batch_size=batch_size, shuffle=shuffle,
                           collate_fn=self._collate, num_workers=0, pin_memory=(self.device == "cuda"))
 
@@ -90,23 +96,47 @@ class Trainer:
             return torch.autocast("cuda", dtype=torch.bfloat16)
         return torch.autocast("cpu", dtype=torch.bfloat16, enabled=False)
 
+    def _transfer_from(self, ckpt: str | Path) -> None:
+        """Warm-start: copy matching-shape tensors from a checkpoint. The encoder
+        and head transfer across stages; the per-source offset (sized to a
+        different source_map) is left fresh."""
+        blob = torch.load(ckpt, map_location=self.device)
+        own = self.model.state_dict()
+        transfer = {k: v for k, v in blob["state_dict"].items()
+                    if k in own and own[k].shape == v.shape}
+        own.update(transfer)
+        self.model.load_state_dict(own)
+        log.info("init_from: transferred %d/%d tensors (encoder+head kept, source offset reset)",
+                 len(transfer), len(own))
+
     # --- public API -------------------------------------------------------- #
     def fit(self, train_df: pd.DataFrame, val_df: pd.DataFrame | None = None,
-            run: RunLogger | None = None) -> "Trainer":
+            run: RunLogger | None = None, init_from: str | Path | None = None) -> "Trainer":
         tc = self.cfg.train
-        self.source_map = {c: i for i, c in enumerate(sorted(train_df["corpus"].unique()))}
+        corpora = sorted(train_df["corpus"].unique())
+        # Reserve an "__unk__" source whose offset stays ~0 (no training row maps to
+        # it, so it gets no gradient). Unseen corpora at predict time then get the
+        # population-mean offset instead of some seen corpus's bias -- keeps
+        # cross-corpus absolute error honest.
+        self.source_map = {c: i for i, c in enumerate(corpora)}
+        self.source_map["__unk__"] = len(corpora)
         self.model = DifficultyRegressor(self.backbone, n_sources=len(self.source_map),
                                          dropout=self.cfg.model.dropout,
                                          use_source_offset=self.cfg.model.use_source_offset)
         if self.cfg.model.peft:
             self.model = apply_lora(self.model)
         self.model.to(self.device)
+        if init_from is not None:                # two-stage: warm-start from Stage A
+            self._transfer_from(init_from)
 
         opt = torch.optim.AdamW(self.model.parameters(), lr=tc.lr, weight_decay=tc.weight_decay)
         loader = self._loader(train_df, shuffle=True, batch_size=tc.batch_size)
-        log.info("teacher/student fit: backbone=%s rows=%d sources=%d device=%s target=%s",
-                 self.backbone, len(train_df), len(self.source_map), self.device, self.target_col)
+        total_steps = max(tc.epochs * len(loader), 1)
+        sched = get_cosine_schedule_with_warmup(opt, int(0.06 * total_steps), total_steps)
+        log.info("fit: backbone=%s rows=%d sources=%d device=%s target=%s steps=%d",
+                 self.backbone, len(train_df), len(corpora), self.device, self.target_col, total_steps)
 
+        best_rmse, best_state = float("inf"), None
         for epoch in range(tc.epochs):
             self.model.train()
             running = 0.0
@@ -120,16 +150,24 @@ class Trainer:
                     pair = _pairwise_loss(pred, y) * tc.pairwise_weight if self.cfg.model.use_pairwise_head else 0.0
                     loss = point + pair
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 opt.step()
+                sched.step()
                 running += float(loss) * len(y)
             msg = {"epoch": epoch + 1, "train_loss": running / len(train_df)}
             if val_df is not None and len(val_df):
                 vp = self.predict(val_df)["pred"].to_numpy()
                 vy = pd.to_numeric(val_df[self.target_col], errors="coerce").to_numpy()
                 msg["val_rmse"], msg["val_spearman"] = rmse(vy, vp), spearman(vy, vp)
+                if msg["val_rmse"] < best_rmse:          # keep the best epoch, not the last
+                    best_rmse = msg["val_rmse"]
+                    best_state = {k: v.detach().cpu().clone() for k, v in self.model.state_dict().items()}
             log.info("epoch %d | %s", epoch + 1, {k: round(v, 4) for k, v in msg.items() if k != "epoch"})
             if run:
                 run.log_metrics(msg, step=epoch + 1)
+        if best_state is not None:
+            self.model.load_state_dict(best_state)
+            log.info("restored best epoch (val_rmse=%.4f)", best_rmse)
         return self
 
     @torch.no_grad()
@@ -166,3 +204,42 @@ class Trainer:
         self.model.load_state_dict(blob["state_dict"])
         self.model.to(self.device)
         return self
+
+
+def fit_student(cfg: Config, pool_df: pd.DataFrame, *,
+                target_col: str = "harmonized_difficulty",
+                run: RunLogger | None = None) -> Trainer:
+    """Train the student: single-pass mixed (default) or the strict two-stage
+    schedule -- pretrain on the large pseudo pool at low LR, then finetune on gold,
+    warm-starting from Stage A. Returns the fitted Trainer.
+
+    Used by both scripts/train.py and the Phase-8 harness, so 'two-stage vs
+    single-pass' is itself a togglable ablation (train.two_stage)."""
+    import copy
+    import tempfile
+
+    if not cfg.train.two_stage:
+        return Trainer(cfg, target_col=target_col).fit(
+            pool_df[pool_df["split"] == "train"], pool_df[pool_df["split"] == "val"], run=run)
+
+    pseudo = pool_df[pool_df["is_pseudo"] == True]
+    gold = pool_df[pool_df["is_pseudo"] != True]
+    if len(pseudo) == 0:
+        log.warning("two_stage requested but the pool has no pseudo rows; single-pass instead")
+        return Trainer(cfg, target_col=target_col).fit(
+            gold[gold["split"] == "train"], gold[gold["split"] == "val"], run=run)
+
+    # Stage A: pretrain on the large pseudo pool at a low LR (absorb broad difficulty)
+    cfg_a = copy.deepcopy(cfg)
+    cfg_a.train.lr, cfg_a.train.epochs = cfg.train.pretrain_lr, cfg.train.pretrain_epochs
+    log.info("two-stage A: pretrain on %d pseudo rows (lr=%.1e epochs=%d)",
+             len(pseudo), cfg_a.train.lr, cfg_a.train.epochs)
+    stage_a = Trainer(cfg_a, target_col=target_col).fit(pseudo, None, run=run)
+
+    # Stage B: finetune on gold, warm-started from Stage A's encoder (anchor to truth)
+    with tempfile.TemporaryDirectory() as tmp:
+        ckpt = stage_a.save(tmp)
+        log.info("two-stage B: finetune on %d gold rows (lr=%.1e epochs=%d)",
+                 len(gold), cfg.train.lr, cfg.train.epochs)
+        return Trainer(cfg, target_col=target_col).fit(
+            gold[gold["split"] == "train"], gold[gold["split"] == "val"], run=run, init_from=ckpt)

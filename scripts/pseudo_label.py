@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from readability.config import load_config
+from readability.data import dedup_against
 from readability.pseudolabel import generate_pseudo_labels
 from readability.schema import CANONICAL_COLUMNS, coerce, read_table, write_table
 from readability.utils import get_logger
@@ -38,6 +39,9 @@ def main(argv: list[str] | None = None) -> int:
     pc, tc = cfg.pseudo, cfg.teacher
     df = read_table(args.table or cfg.data.unified_table)
     pool = read_table(args.pool or cfg.external.pool_table)
+    # integrity: drop external chunks that duplicate any gold/holdout text before
+    # anything else (CLEAR is sourced from the same Gutenberg/Wikipedia we sample).
+    pool = dedup_against(pool, df, key="text")
     gold = df[(df["corpus"] == args.gold_corpus) & df["native_label"].notna()].reset_index(drop=True)
 
     from readability.model import Embedder      # lazy (torch)
@@ -62,7 +66,8 @@ def main(argv: list[str] | None = None) -> int:
     # 3. filter + harmonize
     pseudo = generate_pseudo_labels(pool, gold, teacher_preds=teacher_preds,
                                     pool_emb=pool_emb, gold_emb=gold_emb,
-                                    k_se=pc.k_se, max_std=pc.max_std)
+                                    k_se=pc.k_se, max_std=pc.max_std, dedup_cosine=pc.dedup_cosine,
+                                    extrapolate=pc.extrapolate)
     write_table(pseudo.reindex(columns=CANONICAL_COLUMNS), pc.out_table)
 
     # 4. merged training pool: gold (train/val) + pseudo

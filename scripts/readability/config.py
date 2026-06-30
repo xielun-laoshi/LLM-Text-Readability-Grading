@@ -67,6 +67,9 @@ class TrainConfig:
     pointwise_weight: float = 1.0
     pairwise_weight: float = 1.0
     confidence_weighting: bool = True
+    two_stage: bool = False          # strict pretrain-on-pseudo -> finetune-on-gold
+    pretrain_lr: float = 1.0e-5      # Stage A (pseudo) learning rate, lower than finetune
+    pretrain_epochs: int = 1
     seed: int = 42
 
 
@@ -106,6 +109,8 @@ class TeacherConfig:
 class PseudoLabelConfig:
     k_se: float = 1.0                  # keep |pred - neighbour| <= k_se * neighbour s.e.
     max_std: float | None = None       # disagreement gate (None -> median split)
+    dedup_cosine: float = 0.05         # drop pool chunks within this cosine dist of a gold passage
+    extrapolate: bool = True           # extrapolate the axis beyond CLEAR's range (vs clamp)
     embed_backbone: str = "sentence-transformers/all-MiniLM-L6-v2"
     out_table: str = "artifacts/pseudo_labeled.csv"
     train_pool_table: str = "artifacts/train_pool.csv"  # gold + pseudo, ready for the student

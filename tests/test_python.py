@@ -5,10 +5,12 @@ import numpy as np
 import pandas as pd
 
 from readability.schema import CANONICAL_COLUMNS, Record, coerce, records_to_frame, validate
-from readability.data import percentile_within_corpus, POLARITY, derive_group_id, cv_folds
+from readability.data import percentile_within_corpus, POLARITY, derive_group_id, cv_folds, dedup_against
+from readability.utils import seed_everything
 from readability.evaluation import spearman, pairwise_accuracy, rmse, mean_predictor_rmse
 from readability.external import difficulty_proxy, select_diverse
 from readability.pseudolabel import clear_bt_to_axis, generate_pseudo_labels
+from readability.ablation import aggregate, paired_bootstrap_diff
 
 
 def _toy():
@@ -57,6 +59,15 @@ def test_mean_predictor_rmse_equals_std():
     assert abs(mean_predictor_rmse(y) - y.std(ddof=0)) < 1e-9
 
 
+def test_rank_rmse_is_scale_invariant():
+    from readability.evaluation import rank_rmse
+    y = np.array([1.0, 2.0, 3.0, 4.0, 5.0])
+    p = 10 * y + 100                      # perfect ranking, wildly different scale
+    assert rank_rmse(y, p) < 1e-9         # scale-free: sees the perfect ranking
+    assert rmse(y, p) > 100               # raw RMSE is huge and would mislead cross-corpus
+    assert rank_rmse(y, y[::-1].copy()) > rank_rmse(y, p)   # reversed ranking is worse
+
+
 def test_derive_group_id_collapses_onestop_levels():
     df = pd.DataFrame({"id": ["onestop:Amazon:ele:0", "onestop:Amazon:adv:1", "clear:42"]})
     g = derive_group_id(df).tolist()
@@ -78,6 +89,16 @@ def test_cv_folds_never_leak_a_group():
         validated.append(gva)
     # every article is validated exactly once across the folds
     assert set().union(*validated) == {f"onestop:art{a}" for a in range(10)}
+
+
+def test_load_cefr_maps_levels(tmp_path):
+    from readability.data import load_cefr
+    csv = tmp_path / "cefr.csv"
+    csv.write_text("text,label\nThe cat sat on the mat.,A1\n"
+                   "Notwithstanding the epistemological ramifications elucidated.,C2\n", encoding="utf-8")
+    out = load_cefr(csv)
+    assert set(out["corpus"]) == {"cefr"}
+    assert out["native_label"].min() == 0.0 and out["native_label"].max() == 5.0  # A1->0, C2->5
 
 
 # --- Phase 4: external pool + pseudo-labeling (torch-free logic) ------------ #
@@ -102,6 +123,28 @@ def test_clear_bt_to_axis_inverts_easiness():
     assert ax[0] > ax[1]                               # very negative BT (hard) -> high difficulty
 
 
+def test_clear_bt_to_axis_extrapolates_not_clamps():
+    gold = pd.DataFrame({"native_label": [-2.0, 0.0, 2.0], "harmonized_difficulty": [0.9, 0.5, 0.1]})
+    ax = clear_bt_to_axis(np.array([-2.0, -3.0, -4.0]), gold, extrapolate=True)
+    assert ax[1] > ax[0] and ax[2] > ax[1]             # harder-than-CLEAR stays ordered, not flattened
+    assert ax[2] > 0.9                                 # extrapolated beyond the boundary
+    clamped = clear_bt_to_axis(np.array([-3.0, -4.0]), gold, extrapolate=False)
+    assert clamped[0] == clamped[1] == 0.9             # clamp flattens both onto the boundary
+
+
+def test_generate_pseudo_labels_downweights_out_of_range():
+    gold = coerce(pd.DataFrame({"id": ["clear:1", "clear:2"], "text": ["a", "b"], "corpus": "clear",
+                                "native_label": [-1.0, 1.0], "harmonized_difficulty": [0.9, 0.1],
+                                "std_error": [0.5, 0.5]}))
+    pool = coerce(pd.DataFrame({"id": ["in:0", "out:0"], "text": ["p", "q"], "corpus": "x"}))
+    gold_emb = np.array([[1.0, 0.0], [0.0, 1.0]]); pool_emb = np.array([[1.0, 0.3], [0.3, 1.0]])
+    teacher_preds = np.array([[0.0, 0.0, 0.0], [5.0, 5.0, 5.0]])  # in-range vs far out of CLEAR's range
+    out = generate_pseudo_labels(pool, gold, teacher_preds=teacher_preds, pool_emb=pool_emb,
+                                 gold_emb=gold_emb, k_se=100.0, max_std=10.0, dedup_cosine=0.0)
+    cmap = dict(zip(out["id"], out["mapping_confidence"]))
+    assert cmap["out:0"] < cmap["in:0"]               # teacher extrapolating -> lower confidence
+
+
 def test_generate_pseudo_labels_se_filter_and_harmonize():
     gold = coerce(pd.DataFrame({
         "id": ["clear:1", "clear:2", "clear:3"], "text": ["a", "b", "c"], "corpus": "clear",
@@ -109,7 +152,7 @@ def test_generate_pseudo_labels_se_filter_and_harmonize():
         "std_error": [0.4, 0.4, 0.4]}))
     pool = coerce(pd.DataFrame({"id": ["x:0", "x:1"], "text": ["p", "q"], "corpus": "x"}))
     gold_emb = np.array([[1, 0], [0, 1], [1, 1]], float)
-    pool_emb = np.array([[1, 0.01], [0, 1.0]], float)  # x:0~clear:1(-2.0), x:1~clear:2(0.0)
+    pool_emb = np.array([[1, 0.4], [0.4, 1]], float)   # nearest clear:1 / clear:2, but not near-dups
     teacher_preds = np.array([[-2.0, -2.1, -1.9],      # x:0 plausible vs neighbour -> keep
                               [5.0, 5.1, 4.9]])         # x:1 implausible (|5-0|>se)  -> drop
     out = generate_pseudo_labels(pool, gold, teacher_preds=teacher_preds,
@@ -117,3 +160,52 @@ def test_generate_pseudo_labels_se_filter_and_harmonize():
     assert set(out["id"]) == {"x:0"}
     assert bool(out["is_pseudo"].all())
     assert 0.0 <= float(out["harmonized_difficulty"].iloc[0]) <= 1.0
+
+
+# --- Phase 8: ablation significance + aggregation --------------------------- #
+def test_paired_bootstrap_detects_better_full():
+    rng = np.random.default_rng(0)
+    target = rng.normal(size=200)
+    pred_full = target + rng.normal(scale=0.3, size=200)   # strongly correlated
+    pred_variant = rng.normal(size=200)                    # ~uncorrelated
+    s = paired_bootstrap_diff(target, pred_full, pred_variant, n_boot=500)
+    assert s["delta"] > 0                                   # full ranks better
+    assert s["p_full_not_better"] < 0.05                   # and it's significant
+
+
+def test_aggregate_sorts_by_spearman_and_counts_seeds():
+    rows = [{"variant": "full", "seed": 42, "spearman": 0.80, "rmse": 0.30},
+            {"variant": "full", "seed": 43, "spearman": 0.82, "rmse": 0.29},
+            {"variant": "no_pairwise", "seed": 42, "spearman": 0.70, "rmse": 0.35},
+            {"variant": "no_pairwise", "seed": 43, "spearman": 0.72, "rmse": 0.34}]
+    agg = aggregate(rows)
+    assert agg["variant"].iloc[0] == "full"                # best mean Spearman first
+    assert int(agg.loc[agg["variant"] == "full", "seeds"].iloc[0]) == 2
+
+
+# --- Integrity fixes: torch seeding, cross-corpus dedup, near-dup gate -------- #
+def test_seed_everything_makes_torch_reproducible():
+    import torch
+    seed_everything(123); a = torch.randn(8)
+    seed_everything(123); b = torch.randn(8)
+    assert torch.equal(a, b)                               # was non-reproducible before the fix
+
+
+def test_dedup_against_drops_normalized_matches():
+    pool = pd.DataFrame({"id": ["p1", "p2", "p3"],
+                         "text": ["The cat sat.", "a unique passage", "  the   CAT  sat. "]})
+    ref = pd.DataFrame({"text": ["the cat sat."]})
+    out = dedup_against(pool, ref, key="text")
+    assert set(out["id"]) == {"p2"}                        # p1 and p3 normalize to the reference
+
+
+def test_generate_pseudo_labels_drops_near_duplicate_of_gold():
+    gold = coerce(pd.DataFrame({"id": ["clear:1"], "text": ["a"], "corpus": "clear",
+                                "native_label": [-2.0], "harmonized_difficulty": [0.9],
+                                "std_error": [0.4]}))
+    pool = coerce(pd.DataFrame({"id": ["dup:0"], "text": ["a"], "corpus": "x"}))
+    gold_emb = np.array([[1.0, 0.0]]); pool_emb = np.array([[1.0, 0.0]])  # identical -> near-dup
+    teacher_preds = np.array([[-2.0, -2.0, -2.0]])         # would pass SE, but it's a duplicate
+    out = generate_pseudo_labels(pool, gold, teacher_preds=teacher_preds, pool_emb=pool_emb,
+                                 gold_emb=gold_emb, k_se=1.0, max_std=1.0, dedup_cosine=0.05)
+    assert len(out) == 0

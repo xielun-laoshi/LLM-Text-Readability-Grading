@@ -45,6 +45,14 @@ def seed_everything(seed: int = 42) -> int:
     os.environ["PYTHONHASHSEED"] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
+    try:  # seed torch too if installed (kept lazy so utils stays import-light)
+        import torch
+
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
     return seed
 
 
