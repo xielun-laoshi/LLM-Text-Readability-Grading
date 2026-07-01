@@ -50,7 +50,7 @@ class Embedder:
 # DifficultyRegressor                                                          #
 # --------------------------------------------------------------------------- #
 class DifficultyRegressor(nn.Module):
-    def __init__(self, backbone: str = "microsoft/deberta-v3-base", n_sources: int = 1,
+    def __init__(self, backbone: str = "roberta-base", n_sources: int = 1,
                  dropout: float = 0.1, use_source_offset: bool = True) -> None:
         super().__init__()
         self.encoder = AutoModel.from_pretrained(backbone)

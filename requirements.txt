@@ -13,7 +13,8 @@ openpyxl>=3.1         # read the upstream CLEAR_corpus_final.xlsx
 #   pip install torch --index-url https://download.pytorch.org/whl/cu126
 # (pick the CUDA tag <= what `nvidia-smi` reports; see pytorch.org/get-started)
 transformers>=4.40
-sentencepiece>=0.1.99 # DeBERTa-v3 tokenizer
+sentencepiece>=0.1.99 # DeBERTa-v3 tokenizer (only if you switch backbone to deberta-v3)
+protobuf>=4           # DeBERTa-v3 fast-tokenizer conversion under transformers 5.x
 datasets>=2.19        # streaming fetch of the external pool (build_external_pool.py)
 peft>=0.11            # optional LoRA (model.peft=true)
 accelerate>=0.30      # mixed-precision / device placement helpers

@@ -23,7 +23,7 @@ splits:
   seed: 42
 
 model:
-  backbone: microsoft/deberta-v3-base
+  backbone: roberta-base     # deberta-v3 NaNs on transformers>=~4.47; use transformers<4.47 for it
   max_length: 512
   dropout: 0.1
   use_pairwise_head: true
@@ -52,7 +52,7 @@ external:                    # Phase 4: diverse unlabeled pool
   pool_table: artifacts/external_pool.csv
 
 teacher:                     # Phase 4: teacher ensemble (predicts CLEAR BT)
-  backbone: microsoft/deberta-v3-base
+  backbone: roberta-base     # deberta-v3 NaNs on transformers>=~4.47; use transformers<4.47 for it
   n_teachers: 3
   target_col: native_label
   dir: models/teachers
