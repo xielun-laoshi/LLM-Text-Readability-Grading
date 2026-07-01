@@ -91,6 +91,15 @@ def test_cv_folds_never_leak_a_group():
     assert set().union(*validated) == {f"onestop:art{a}" for a in range(10)}
 
 
+def test_read_clear_aliases_drifted_columns(tmp_path):
+    from readability.data import read_clear
+    csv = tmp_path / "clear.csv"
+    csv.write_text("ID,Excerpt,BT_easiness,s.e.,Categ\n1,hello world,-0.5,0.4,Lit\n", encoding="utf-8")
+    df = read_clear(csv)  # upstream names should be aliased to canonical
+    assert {"BT Easiness", "BT s.e.", "Category"} <= set(df.columns)
+    assert df["BT Easiness"].iloc[0] == -0.5
+
+
 def test_load_cefr_maps_levels(tmp_path):
     from readability.data import load_cefr
     csv = tmp_path / "cefr.csv"
@@ -114,6 +123,14 @@ def test_select_diverse_caps_size_and_keeps_every_source():
     out = select_diverse(pd.DataFrame(rows), n_total=60, n_bins=5, seed=0)
     assert len(out) <= 60
     assert set(out["corpus"]) == {"a", "b"}            # diversity: both sources survive
+
+
+def test_build_external_pool_caps_chunks_per_doc(monkeypatch):
+    import readability.external as ext
+    long_doc = " ".join(["word"] * 2000)               # one long doc -> many raw chunks
+    monkeypatch.setattr(ext, "fetch_texts", lambda source, limit: [long_doc])
+    pool = ext.build_external_pool(["wiki_simple"], per_source_docs=1, max_chunks_per_doc=3)
+    assert 1 <= len(pool) <= 3                          # capped to a few varied chunks per doc
 
 
 def test_clear_bt_to_axis_inverts_easiness():

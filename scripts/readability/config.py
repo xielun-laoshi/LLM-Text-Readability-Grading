@@ -49,7 +49,7 @@ class SplitConfig:
 class ModelConfig:
     # Consumed by the C++ trainer (/src). Kept here so prep/eval and the model
     # share one config surface.
-    backbone: str = "microsoft/deberta-v3-base"
+    backbone: str = "roberta-base"   # deberta-v3 NaNs on transformers>=~4.47 (use <4.47 for it)
     max_length: int = 512
     dropout: float = 0.1
     use_pairwise_head: bool = True
@@ -94,12 +94,13 @@ class ExternalConfig:
     per_source_docs: int = 5000        # streamed per source (bounded; raise on the H100)
     n_total: int = 200_000             # diverse-selected pool size
     n_bins: int = 10
+    max_chunks_per_doc: int = 5         # cap per document (bounds memory + boosts diversity)
     pool_table: str = "artifacts/external_pool.csv"
 
 
 @dataclass
 class TeacherConfig:
-    backbone: str = "microsoft/deberta-v3-base"
+    backbone: str = "roberta-base"   # deberta-v3 NaNs on transformers>=~4.47 (use <4.47 for it)
     n_teachers: int = 3                # ensemble for disagreement filtering
     target_col: str = "native_label"   # teacher predicts CLEAR BT (SE-filter in BT units)
     dir: str = "models/teachers"

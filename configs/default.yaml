@@ -15,15 +15,16 @@ data:
   max_tokens: 600
 
 splits:
-  holdout_corpora: []      # e.g. [onestop] -> cross-corpus gold test
-  holdout_formats: []      # e.g. [poetry]  -> cross-format gold test
+  holdout_corpora: [onestop, cefr]   # cross-corpus gold test = the project's headline
+                                     # (set [] to train/eval fully in-distribution)
+  holdout_formats: []                # e.g. [poetry] -> cross-format gold test
   group_by: corpus
   n_folds: 5
   val_fraction: 0.1
   seed: 42
 
 model:
-  backbone: microsoft/deberta-v3-base
+  backbone: roberta-base     # deberta-v3 NaNs on transformers>=~4.47; use transformers<4.47 for it
   max_length: 512
   dropout: 0.1
   use_pairwise_head: true
@@ -49,10 +50,11 @@ external:                    # Phase 4: diverse unlabeled pool
   per_source_docs: 5000      # streamed per source (bounded); raise freely on the H100
   n_total: 200000            # diverse-selected pool size
   n_bins: 10
+  max_chunks_per_doc: 5      # cap per document (bounds memory + boosts diversity)
   pool_table: artifacts/external_pool.csv
 
 teacher:                     # Phase 4: teacher ensemble (predicts CLEAR BT)
-  backbone: microsoft/deberta-v3-base
+  backbone: roberta-base     # deberta-v3 NaNs on transformers>=~4.47; use transformers<4.47 for it
   n_teachers: 3
   target_col: native_label
   dir: models/teachers
