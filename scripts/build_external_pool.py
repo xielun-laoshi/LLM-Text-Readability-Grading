@@ -36,7 +36,8 @@ def main(argv: list[str] | None = None) -> int:
     cfg = load_config(args.config)
     ec = cfg.external
     pool = build_external_pool(args.sources or ec.sources,
-                               per_source_docs=args.per_source_docs or ec.per_source_docs)
+                               per_source_docs=args.per_source_docs or ec.per_source_docs,
+                               max_chunks_per_doc=ec.max_chunks_per_doc)
     pool = select_diverse(pool, n_total=args.n_total or ec.n_total,
                           n_bins=ec.n_bins, seed=cfg.splits.seed)
     out = write_table(pool, args.out or ec.pool_table)

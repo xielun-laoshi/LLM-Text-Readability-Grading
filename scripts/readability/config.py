@@ -94,6 +94,7 @@ class ExternalConfig:
     per_source_docs: int = 5000        # streamed per source (bounded; raise on the H100)
     n_total: int = 200_000             # diverse-selected pool size
     n_bins: int = 10
+    max_chunks_per_doc: int = 5         # cap per document (bounds memory + boosts diversity)
     pool_table: str = "artifacts/external_pool.csv"
 
 

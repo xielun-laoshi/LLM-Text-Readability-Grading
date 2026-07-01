@@ -125,6 +125,14 @@ def test_select_diverse_caps_size_and_keeps_every_source():
     assert set(out["corpus"]) == {"a", "b"}            # diversity: both sources survive
 
 
+def test_build_external_pool_caps_chunks_per_doc(monkeypatch):
+    import readability.external as ext
+    long_doc = " ".join(["word"] * 2000)               # one long doc -> many raw chunks
+    monkeypatch.setattr(ext, "fetch_texts", lambda source, limit: [long_doc])
+    pool = ext.build_external_pool(["wiki_simple"], per_source_docs=1, max_chunks_per_doc=3)
+    assert 1 <= len(pool) <= 3                          # capped to a few varied chunks per doc
+
+
 def test_clear_bt_to_axis_inverts_easiness():
     gold = pd.DataFrame({"native_label": [-3.0, -1.0, 1.0],
                          "harmonized_difficulty": [1.0, 0.5, 0.0]})

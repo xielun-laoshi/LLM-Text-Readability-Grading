@@ -60,21 +60,30 @@ def difficulty_proxy(text: str) -> float:
 
 
 def build_external_pool(sources: list[str], *, per_source_docs: int,
-                        min_tokens: int = 50, max_tokens: int = 320) -> pd.DataFrame:
+                        min_tokens: int = 50, max_tokens: int = 320,
+                        max_chunks_per_doc: int = 5) -> pd.DataFrame:
     """Fetch -> window -> schema for each source. Rows are unlabeled (native_label
-    NaN, split 'unlabeled'); pseudo-labeling fills them in later."""
+    NaN, split 'unlabeled'); pseudo-labeling fills them in later.
+
+    Keeps at most ``max_chunks_per_doc`` evenly-spaced chunks per document, so a
+    single long book (Gutenberg windows into hundreds of chunks) contributes a few
+    varied excerpts instead of hundreds of correlated ones -- this bounds memory
+    AND boosts diversity (correlated same-author chunks are the opposite of it)."""
     records: list[Record] = []
     for source in sources:
         domain = SOURCES[source][3]
         for di, doc in enumerate(fetch_texts(source, per_source_docs)):
-            for ci, chunk in enumerate(window_text(doc, target_words=180,
-                                                   max_words=max_tokens, min_words=min_tokens)):
+            chunks = window_text(doc, target_words=180, max_words=max_tokens, min_words=min_tokens)
+            if len(chunks) > max_chunks_per_doc:
+                keep = sorted(set(np.linspace(0, len(chunks) - 1, max_chunks_per_doc).round().astype(int)))
+                chunks = [chunks[k] for k in keep]
+            for ci, chunk in enumerate(chunks):
                 records.append(Record(id=f"{source}:{di}:{ci}", text=chunk, corpus=source,
                                       native_scale="unlabeled", format_type="prose",
                                       domain=domain, language="en", split="unlabeled"))
     df = coerce(records_to_frame(records))
     df = filter_corpus(df, min_tokens=min_tokens, max_tokens=max_tokens)
-    log.info("external pool: %d chunks across %s", len(df), sources)
+    log.info("external pool: %d chunks across %s (<=%d per doc)", len(df), sources, max_chunks_per_doc)
     return df
 
 

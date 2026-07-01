@@ -30,7 +30,11 @@ def _train_table(cfg, key: str) -> pd.DataFrame:
     if key == "gold":
         return read_table(cfg.data.unified_table)
     p = cfg.pseudo.train_pool_table
-    return read_table(p if Path(p).exists() else cfg.data.unified_table)
+    if not Path(p).exists():
+        log.warning("train_pool %s missing -> falling back to gold; 'full' will equal "
+                    "'no_pseudo'. Run scripts/pseudo_label.py first for a valid pseudo ablation.", p)
+        return read_table(cfg.data.unified_table)
+    return read_table(p)
 
 
 def main(argv: list[str] | None = None) -> int:

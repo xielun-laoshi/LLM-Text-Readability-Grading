@@ -50,6 +50,7 @@ external:                    # Phase 4: diverse unlabeled pool
   per_source_docs: 5000      # streamed per source (bounded); raise freely on the H100
   n_total: 200000            # diverse-selected pool size
   n_bins: 10
+  max_chunks_per_doc: 5      # cap per document (bounds memory + boosts diversity)
   pool_table: artifacts/external_pool.csv
 
 teacher:                     # Phase 4: teacher ensemble (predicts CLEAR BT)
