@@ -15,8 +15,9 @@ data:
   max_tokens: 600
 
 splits:
-  holdout_corpora: []      # e.g. [onestop] -> cross-corpus gold test
-  holdout_formats: []      # e.g. [poetry]  -> cross-format gold test
+  holdout_corpora: [onestop, cefr]   # cross-corpus gold test = the project's headline
+                                     # (set [] to train/eval fully in-distribution)
+  holdout_formats: []                # e.g. [poetry] -> cross-format gold test
   group_by: corpus
   n_folds: 5
   val_fraction: 0.1
