@@ -100,6 +100,28 @@ def test_read_clear_aliases_drifted_columns(tmp_path):
     assert df["BT Easiness"].iloc[0] == -0.5
 
 
+def test_window_text_two_chunk_short_tail_does_not_crash():
+    from readability.data import window_text
+    # 180-word para + 20-word tail para -> 2 chunks, tail < min_words.
+    # The old one-liner merge popped before resolving chunks[-2] -> IndexError.
+    doc = ("alpha " * 180).strip() + "\n\n" + ("tail " * 20).strip()
+    out = window_text(doc)
+    assert len(out) == 1
+    assert "alpha" in out[0] and "tail" in out[0]        # merged, nothing lost
+
+
+def test_window_text_short_tail_merge_preserves_all_chunks():
+    from readability.data import window_text
+    # 3 paras -> 3 chunks with a short tail. The old merge silently LOST the
+    # first chunk and duplicated the second; the fix merges tail into the last.
+    doc = ("alpha " * 180).strip() + "\n\n" + ("bravo " * 180).strip() + "\n\n" + ("tail " * 20).strip()
+    out = window_text(doc)
+    assert len(out) == 2
+    assert any("alpha" in c for c in out)                # first chunk survives
+    assert "tail" in out[-1] and "bravo" in out[-1]      # tail merged into last
+    assert sum(1 for c in out if "bravo" in c) == 1      # no duplication
+
+
 def test_load_cefr_maps_levels(tmp_path):
     from readability.data import load_cefr
     csv = tmp_path / "cefr.csv"
